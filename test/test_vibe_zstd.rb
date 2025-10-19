@@ -20,7 +20,7 @@ class TestVibeZstd < Minitest::Test
     cctx = VibeZstd::CCtx.new
     dctx = VibeZstd::DCtx.new
     data = "Hello, world! This is a test string for compression."
-    compressed = cctx.compress(data, 5)
+    compressed = cctx.compress(data, level: 5)
     decompressed = dctx.decompress(compressed)
     assert_equal data, decompressed
   end
@@ -34,8 +34,8 @@ class TestVibeZstd < Minitest::Test
 
     # Test compression and decompression with dictionary
     data = "Hello, world! This is dictionary compressed data."
-    compressed = cctx.compress(data, nil, cdict)
-    decompressed = dctx.decompress(compressed, ddict)
+    compressed = cctx.compress(data, dict: cdict)
+    decompressed = dctx.decompress(compressed, dict: ddict)
     assert_equal data, decompressed
   end
 
@@ -226,7 +226,7 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # Enable checksum
-    cctx.set_parameter(:checksumFlag, 1)
+    cctx.checksum_flag = 1
 
     data = "Hello, world! This is a test with checksum."
     compressed = cctx.compress(data)
@@ -240,7 +240,7 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # Enable content size in frame
-    cctx.set_parameter(:contentSizeFlag, 1)
+    cctx.content_size_flag = 1
 
     data = "Hello, world! This is a test with content size."
     compressed = cctx.compress(data)
@@ -258,7 +258,7 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # Set window log to 10 (1KB window)
-    cctx.set_parameter(:windowLog, 10)
+    cctx.window_log = 10
 
     data = "Small data for small window"
     compressed = cctx.compress(data)
@@ -271,8 +271,8 @@ class TestVibeZstd < Minitest::Test
     cctx = VibeZstd::CCtx.new
     dctx = VibeZstd::DCtx.new
 
-    # Set compression level via set_parameter
-    cctx.set_parameter(:compressionLevel, 9)
+    # Set compression level via setter
+    cctx.compression_level = 9
 
     data = "Test data for compression level parameter"
     compressed = cctx.compress(data)
@@ -282,13 +282,9 @@ class TestVibeZstd < Minitest::Test
   end
 
   def test_set_parameter_method_chaining
-    cctx = VibeZstd::CCtx.new
+    # Test keyword argument initialization
+    cctx = VibeZstd::CCtx.new(checksum_flag: 1, content_size_flag: 1)
     dctx = VibeZstd::DCtx.new
-
-    # Test method chaining
-    cctx
-      .set_parameter(:checksumFlag, 1)
-      .set_parameter(:contentSizeFlag, 1)
 
     data = "Test data for method chaining"
     compressed = cctx.compress(data)
@@ -304,8 +300,8 @@ class TestVibeZstd < Minitest::Test
     data = "Test data for pledged source size"
 
     # Compress with pledged source size
-    cctx.set_parameter(:contentSizeFlag, 1)
-    compressed = cctx.compress(data, nil, nil, pledged_size: data.bytesize)
+    cctx.content_size_flag = 1
+    compressed = cctx.compress(data, pledged_size: data.bytesize)
 
     # Verify content size was set
     size = VibeZstd.frame_content_size(compressed)
@@ -434,10 +430,10 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # Set a small window on decompression context
-    dctx.set_parameter(:windowLogMax, 10)
+    dctx.window_log_max = 10
 
     # Compress with matching window
-    cctx.set_parameter(:windowLog, 10)
+    cctx.window_log = 10
     data = "Small data for small window"
     compressed = cctx.compress(data)
 
@@ -454,12 +450,12 @@ class TestVibeZstd < Minitest::Test
     data = "Test data for negative compression level " * 100
 
     # Test level -1 (fastest)
-    compressed_neg1 = cctx.compress(data, -1)
+    compressed_neg1 = cctx.compress(data, level: -1)
     decompressed = dctx.decompress(compressed_neg1)
     assert_equal(data, decompressed)
 
     # Test level -5 (very fast)
-    compressed_neg5 = cctx.compress(data, -5)
+    compressed_neg5 = cctx.compress(data, level: -5)
     decompressed = dctx.decompress(compressed_neg5)
     assert_equal(data, decompressed)
 
@@ -524,27 +520,27 @@ class TestVibeZstd < Minitest::Test
     cctx = VibeZstd::CCtx.new
 
     # Set a parameter and verify we can read it back
-    cctx.set_parameter(:compression_level, 9)
-    level = cctx.get_parameter(:compression_level)
+    cctx.compression_level = 9
+    level = cctx.compression_level
     assert_equal(9, level)
 
     # Test window_log
-    cctx.set_parameter(:window_log, 20)
-    window_log = cctx.get_parameter(:window_log)
+    cctx.window_log = 20
+    window_log = cctx.window_log
     assert_equal(20, window_log)
 
-    # Test checksum_flag
-    cctx.set_parameter(:checksum_flag, 1)
-    checksum = cctx.get_parameter(:checksum_flag)
-    assert_equal(1, checksum)
+    # Test checksum_flag (returns boolean)
+    cctx.checksum_flag = 1
+    checksum = cctx.checksum_flag
+    assert_equal(true, checksum)
   end
 
   def test_dctx_get_parameter
     dctx = VibeZstd::DCtx.new
 
     # Set window_log_max and verify we can read it back
-    dctx.set_parameter(:window_log_max, 20)
-    window_log_max = dctx.get_parameter(:window_log_max)
+    dctx.window_log_max = 20
+    window_log_max = dctx.window_log_max
     assert_equal(20, window_log_max)
   end
 
@@ -555,8 +551,8 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # Set searchLog and verify
-    cctx.set_parameter(:searchLog, 5)
-    assert_equal(5, cctx.get_parameter(:searchLog))
+    cctx.search_log = 5
+    assert_equal(5, cctx.search_log)
 
     # Test compression with search_log
     data = "Test data for searchLog parameter " * 50
@@ -570,8 +566,8 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # Set minMatch and verify
-    cctx.set_parameter(:minMatch, 4)
-    assert_equal(4, cctx.get_parameter(:minMatch))
+    cctx.min_match = 4
+    assert_equal(4, cctx.min_match)
 
     # Test compression with min_match
     data = "Test data for minMatch parameter " * 50
@@ -585,8 +581,8 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # Set targetLength and verify
-    cctx.set_parameter(:targetLength, 16)
-    assert_equal(16, cctx.get_parameter(:targetLength))
+    cctx.target_length = 16
+    assert_equal(16, cctx.target_length)
 
     # Test compression with target_length
     data = "Test data for targetLength parameter " * 50
@@ -601,8 +597,8 @@ class TestVibeZstd < Minitest::Test
 
     # Set targetCBlockSize and verify (important for low-latency streaming)
     # Note: zstd may clamp this value to a minimum bound (ZSTD_TARGETCBLOCKSIZE_MIN)
-    cctx.set_parameter(:targetCBlockSize, 2048)
-    value = cctx.get_parameter(:targetCBlockSize)
+    cctx.target_cblock_size = 2048
+    value = cctx.target_cblock_size
     # Value should be at least what we set or the minimum bound
     assert(value >= 1024, "targetCBlockSize should be >= 1024, got #{value}")
 
@@ -618,8 +614,8 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # Enable LDM and verify
-    cctx.set_parameter(:enableLongDistanceMatching, 1)
-    assert_equal(1, cctx.get_parameter(:enableLongDistanceMatching))
+    cctx.enable_long_distance_matching = 1
+    assert_equal(true, cctx.enable_long_distance_matching)
 
     # Test with large data to benefit from LDM
     pattern = "This is a repeating pattern that appears multiple times. " * 20
@@ -638,11 +634,11 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # Enable LDM first
-    cctx.set_parameter(:enableLongDistanceMatching, 1)
+    cctx.enable_long_distance_matching = 1
 
     # Set ldmHashLog and verify
-    cctx.set_parameter(:ldmHashLog, 20)
-    assert_equal(20, cctx.get_parameter(:ldmHashLog))
+    cctx.ldm_hash_log = 20
+    assert_equal(20, cctx.ldm_hash_log)
 
     # Test compression
     data = ("Repeating pattern for LDM " * 50) * 20
@@ -656,11 +652,11 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # Enable LDM first
-    cctx.set_parameter(:enableLongDistanceMatching, 1)
+    cctx.enable_long_distance_matching = 1
 
     # Set ldmMinMatch and verify
-    cctx.set_parameter(:ldmMinMatch, 64)
-    assert_equal(64, cctx.get_parameter(:ldmMinMatch))
+    cctx.ldm_min_match = 64
+    assert_equal(64, cctx.ldm_min_match)
 
     # Test compression
     data = ("Repeating pattern for LDM min match " * 50) * 20
@@ -674,11 +670,11 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # Enable LDM first
-    cctx.set_parameter(:enableLongDistanceMatching, 1)
+    cctx.enable_long_distance_matching = 1
 
     # Set ldmBucketSizeLog and verify
-    cctx.set_parameter(:ldmBucketSizeLog, 3)
-    assert_equal(3, cctx.get_parameter(:ldmBucketSizeLog))
+    cctx.ldm_bucket_size_log = 3
+    assert_equal(3, cctx.ldm_bucket_size_log)
 
     # Test compression
     data = "Test data for LDM bucket size " * 200
@@ -692,11 +688,11 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # Enable LDM first
-    cctx.set_parameter(:enableLongDistanceMatching, 1)
+    cctx.enable_long_distance_matching = 1
 
     # Set ldmHashRateLog and verify
-    cctx.set_parameter(:ldmHashRateLog, 5)
-    assert_equal(5, cctx.get_parameter(:ldmHashRateLog))
+    cctx.ldm_hash_rate_log = 5
+    assert_equal(5, cctx.ldm_hash_rate_log)
 
     # Test compression
     data = "Test data for LDM hash rate " * 200
@@ -710,11 +706,11 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # Set nbWorkers first (required for jobSize to have effect)
-    cctx.set_parameter(:nbWorkers, 2)
+    cctx.nb_workers = 2
 
     # Set jobSize and verify
-    cctx.set_parameter(:jobSize, 1048576) # 1MB
-    assert_equal(1048576, cctx.get_parameter(:jobSize))
+    cctx.job_size = 1048576 # 1MB
+    assert_equal(1048576, cctx.job_size)
 
     # Test compression with multi-threading
     data = "Test data for multi-threaded compression with job size " * 1000
@@ -728,11 +724,11 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # Set nbWorkers first (required for overlapLog to have effect)
-    cctx.set_parameter(:nbWorkers, 2)
+    cctx.nb_workers = 2
 
     # Set overlapLog and verify
-    cctx.set_parameter(:overlapLog, 5)
-    assert_equal(5, cctx.get_parameter(:overlapLog))
+    cctx.overlap_log = 5
+    assert_equal(5, cctx.overlap_log)
 
     # Test compression with multi-threading and overlap
     data = "Test data for multi-threaded compression with overlap " * 1000
@@ -745,17 +741,17 @@ class TestVibeZstd < Minitest::Test
     cctx = VibeZstd::CCtx.new
 
     # Test both snake_case and camelCase work for new parameters
-    cctx.set_parameter(:search_log, 4)
-    assert_equal(4, cctx.get_parameter(:searchLog))
+    cctx.search_log = 4
+    assert_equal(4, cctx.search_log)
 
-    cctx.set_parameter(:minMatch, 5)
-    assert_equal(5, cctx.get_parameter(:min_match))
+    cctx.min_match = 5
+    assert_equal(5, cctx.min_match)
 
-    cctx.set_parameter(:target_length, 32)
-    assert_equal(32, cctx.get_parameter(:targetLength))
+    cctx.target_length = 32
+    assert_equal(32, cctx.target_length)
 
-    cctx.set_parameter(:enableLongDistanceMatching, 1)
-    assert_equal(1, cctx.get_parameter(:enable_long_distance_matching))
+    cctx.enable_long_distance_matching = 1
+    assert_equal(true, cctx.enable_long_distance_matching)
   end
 
   def test_ldm_comprehensive
@@ -763,18 +759,18 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # Configure full LDM setup
-    cctx.set_parameter(:enableLongDistanceMatching, 1)
-    cctx.set_parameter(:ldmHashLog, 20)
-    cctx.set_parameter(:ldmMinMatch, 64)
-    cctx.set_parameter(:ldmBucketSizeLog, 3)
-    cctx.set_parameter(:ldmHashRateLog, 6)
+    cctx.enable_long_distance_matching = 1
+    cctx.ldm_hash_log = 20
+    cctx.ldm_min_match = 64
+    cctx.ldm_bucket_size_log = 3
+    cctx.ldm_hash_rate_log = 6
 
     # Create data with long-distance repetition
     base_pattern = "This is a base pattern that will repeat. " * 100
     middle_content = "Unique middle content. " * 200
     data = base_pattern + middle_content + base_pattern
 
-    compressed = cctx.compress(data, 9) # High compression level
+    compressed = cctx.compress(data, level: 9) # High compression level
     decompressed = dctx.decompress(compressed)
 
     assert_equal(data, decompressed)
@@ -786,7 +782,7 @@ class TestVibeZstd < Minitest::Test
   # Tests for parameter bounds API
 
   def test_cctx_parameter_bounds_compression_level
-    bounds = VibeZstd::CCtx.parameter_bounds(:compressionLevel)
+    bounds = VibeZstd::CCtx.parameter_bounds(:compression_level)
 
     assert_instance_of(Hash, bounds)
     assert(bounds.key?(:min))
@@ -797,7 +793,7 @@ class TestVibeZstd < Minitest::Test
   end
 
   def test_cctx_parameter_bounds_window_log
-    bounds = VibeZstd::CCtx.parameter_bounds(:windowLog)
+    bounds = VibeZstd::CCtx.parameter_bounds(:window_log)
 
     assert_instance_of(Hash, bounds)
     assert_equal(2, bounds.size)
@@ -809,12 +805,12 @@ class TestVibeZstd < Minitest::Test
   def test_cctx_parameter_bounds_all_parameters
     # Test that bounds work for all parameters
     parameters = [
-      :compressionLevel, :windowLog, :hashLog, :chainLog, :searchLog,
-      :minMatch, :targetLength, :strategy, :targetCBlockSize,
-      :enableLongDistanceMatching, :ldmHashLog, :ldmMinMatch,
-      :ldmBucketSizeLog, :ldmHashRateLog,
-      :contentSizeFlag, :checksumFlag, :dictIDFlag,
-      :nbWorkers, :jobSize, :overlapLog
+      :compression_level, :window_log, :hash_log, :chain_log, :search_log,
+      :min_match, :target_length, :strategy, :target_cblock_size,
+      :enable_long_distance_matching, :ldm_hash_log, :ldm_min_match,
+      :ldm_bucket_size_log, :ldm_hash_rate_log,
+      :content_size_flag, :checksum_flag, :dict_id_flag,
+      :nb_workers, :job_size, :overlap_log
     ]
 
     parameters.each do |param|
@@ -831,7 +827,7 @@ class TestVibeZstd < Minitest::Test
   def test_cctx_parameter_bounds_snake_case
     # Test that snake_case works
     bounds1 = VibeZstd::CCtx.parameter_bounds(:compression_level)
-    bounds2 = VibeZstd::CCtx.parameter_bounds(:compressionLevel)
+    bounds2 = VibeZstd::CCtx.parameter_bounds(:compression_level)
 
     assert_equal(bounds1[:min], bounds2[:min])
     assert_equal(bounds1[:max], bounds2[:max])
@@ -844,7 +840,7 @@ class TestVibeZstd < Minitest::Test
   end
 
   def test_dctx_parameter_bounds_window_log_max
-    bounds = VibeZstd::DCtx.parameter_bounds(:windowLogMax)
+    bounds = VibeZstd::DCtx.parameter_bounds(:window_log_max)
 
     assert_instance_of(Hash, bounds)
     assert(bounds.key?(:min))
@@ -856,7 +852,7 @@ class TestVibeZstd < Minitest::Test
   def test_dctx_parameter_bounds_snake_case
     # Test that snake_case works
     bounds1 = VibeZstd::DCtx.parameter_bounds(:window_log_max)
-    bounds2 = VibeZstd::DCtx.parameter_bounds(:windowLogMax)
+    bounds2 = VibeZstd::DCtx.parameter_bounds(:window_log_max)
 
     assert_equal(bounds1[:min], bounds2[:min])
     assert_equal(bounds1[:max], bounds2[:max])
@@ -866,14 +862,14 @@ class TestVibeZstd < Minitest::Test
     # Test practical use case: validating parameter before setting
     cctx = VibeZstd::CCtx.new
 
-    bounds = VibeZstd::CCtx.parameter_bounds(:windowLog)
+    bounds = VibeZstd::CCtx.parameter_bounds(:window_log)
 
     # Set to min and max bounds
-    cctx.set_parameter(:windowLog, bounds[:min])
-    assert_equal(bounds[:min], cctx.get_parameter(:windowLog))
+    cctx.window_log = bounds[:min]
+    assert_equal(bounds[:min], cctx.window_log)
 
-    cctx.set_parameter(:windowLog, bounds[:max])
-    assert_equal(bounds[:max], cctx.get_parameter(:windowLog))
+    cctx.window_log = bounds[:max]
+    assert_equal(bounds[:max], cctx.window_log)
   end
 
   # Tests for experimental parameters
@@ -881,8 +877,8 @@ class TestVibeZstd < Minitest::Test
     cctx = VibeZstd::CCtx.new
     dctx = VibeZstd::DCtx.new
 
-    cctx.set_parameter(:rsyncable, 1)
-    assert_equal(1, cctx.get_parameter(:rsyncable))
+    cctx.rsyncable = 1
+    assert_equal(true, cctx.rsyncable)
 
     data = "Test data for rsyncable parameter " * 50
     compressed = cctx.compress(data)
@@ -895,8 +891,8 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # Test magicless format (ZSTD_f_zstd1_magicless = 1)
-    cctx.set_parameter(:format, 1)
-    assert_equal(1, cctx.get_parameter(:format))
+    cctx.format = 1
+    assert_equal(1, cctx.format)
 
     data = "Test data for format parameter " * 50
     compressed = cctx.compress(data)
@@ -907,16 +903,16 @@ class TestVibeZstd < Minitest::Test
   def test_force_max_window_parameter
     cctx = VibeZstd::CCtx.new
 
-    cctx.set_parameter(:forceMaxWindow, 1)
-    assert_equal(1, cctx.get_parameter(:forceMaxWindow))
+    cctx.force_max_window = 1
+    assert_equal(true, cctx.force_max_window)
   end
 
   def test_force_attach_dict_parameter
     cctx = VibeZstd::CCtx.new
 
     # ZSTD_dictDefaultAttach = 0, ZSTD_dictForceAttach = 1, ZSTD_dictForceCopy = 2
-    cctx.set_parameter(:forceAttachDict, 0)
-    assert_equal(0, cctx.get_parameter(:forceAttachDict))
+    cctx.force_attach_dict = 0
+    assert_equal(0, cctx.force_attach_dict)
   end
 
   def test_literal_compression_mode_parameter
@@ -924,8 +920,8 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # ZSTD_ps_auto = 0, ZSTD_ps_enable = 1, ZSTD_ps_disable = 2
-    cctx.set_parameter(:literalCompressionMode, 1)
-    assert_equal(1, cctx.get_parameter(:literalCompressionMode))
+    cctx.literal_compression_mode = 1
+    assert_equal(1, cctx.literal_compression_mode)
 
     data = "Test data for literal compression mode " * 50
     compressed = cctx.compress(data)
@@ -937,43 +933,43 @@ class TestVibeZstd < Minitest::Test
     cctx = VibeZstd::CCtx.new
 
     # Provide hint about source size
-    cctx.set_parameter(:srcSizeHint, 10000)
-    assert_equal(10000, cctx.get_parameter(:srcSizeHint))
+    cctx.src_size_hint = 10000
+    assert_equal(10000, cctx.src_size_hint)
   end
 
   def test_enable_dedicated_dict_search_parameter
     cctx = VibeZstd::CCtx.new
 
-    cctx.set_parameter(:enableDedicatedDictSearch, 1)
-    assert_equal(1, cctx.get_parameter(:enableDedicatedDictSearch))
+    cctx.enable_dedicated_dict_search = 1
+    assert_equal(true, cctx.enable_dedicated_dict_search)
   end
 
   def test_stable_in_buffer_parameter
     cctx = VibeZstd::CCtx.new
 
-    cctx.set_parameter(:stableInBuffer, 1)
-    assert_equal(1, cctx.get_parameter(:stableInBuffer))
+    cctx.stable_in_buffer = 1
+    assert_equal(true, cctx.stable_in_buffer)
   end
 
   def test_stable_out_buffer_parameter
     cctx = VibeZstd::CCtx.new
 
-    cctx.set_parameter(:stableOutBuffer, 1)
-    assert_equal(1, cctx.get_parameter(:stableOutBuffer))
+    cctx.stable_out_buffer = 1
+    assert_equal(true, cctx.stable_out_buffer)
   end
 
   def test_block_delimiters_parameter
     cctx = VibeZstd::CCtx.new
 
-    cctx.set_parameter(:blockDelimiters, 1)
-    assert_equal(1, cctx.get_parameter(:blockDelimiters))
+    cctx.block_delimiters = 1
+    assert_equal(true, cctx.block_delimiters)
   end
 
   def test_validate_sequences_parameter
     cctx = VibeZstd::CCtx.new
 
-    cctx.set_parameter(:validateSequences, 1)
-    assert_equal(1, cctx.get_parameter(:validateSequences))
+    cctx.validate_sequences = 1
+    assert_equal(true, cctx.validate_sequences)
   end
 
   def test_use_row_match_finder_parameter
@@ -981,8 +977,8 @@ class TestVibeZstd < Minitest::Test
     dctx = VibeZstd::DCtx.new
 
     # ZSTD_urm_auto = 0, ZSTD_urm_disableRowMatchFinder = 1, ZSTD_urm_enableRowMatchFinder = 2
-    cctx.set_parameter(:useRowMatchFinder, 2)
-    assert_equal(2, cctx.get_parameter(:useRowMatchFinder))
+    cctx.use_row_match_finder = 2
+    assert_equal(2, cctx.use_row_match_finder)
 
     data = "Test data for row match finder " * 50
     compressed = cctx.compress(data)
@@ -993,52 +989,52 @@ class TestVibeZstd < Minitest::Test
   def test_deterministic_ref_prefix_parameter
     cctx = VibeZstd::CCtx.new
 
-    cctx.set_parameter(:deterministicRefPrefix, 1)
-    assert_equal(1, cctx.get_parameter(:deterministicRefPrefix))
+    cctx.deterministic_ref_prefix = 1
+    assert_equal(true, cctx.deterministic_ref_prefix)
   end
 
   def test_prefetch_cdict_tables_parameter
     cctx = VibeZstd::CCtx.new
 
     # ZSTD_ps_auto = 0, ZSTD_ps_enable = 1, ZSTD_ps_disable = 2
-    cctx.set_parameter(:prefetchCDictTables, 1)
-    assert_equal(1, cctx.get_parameter(:prefetchCDictTables))
+    cctx.prefetch_cdict_tables = 1
+    assert_equal(1, cctx.prefetch_cdict_tables)
   end
 
   def test_enable_seq_producer_fallback_parameter
     cctx = VibeZstd::CCtx.new
 
-    cctx.set_parameter(:enableSeqProducerFallback, 1)
-    assert_equal(1, cctx.get_parameter(:enableSeqProducerFallback))
+    cctx.enable_seq_producer_fallback = 1
+    assert_equal(true, cctx.enable_seq_producer_fallback)
   end
 
   def test_max_block_size_parameter
     cctx = VibeZstd::CCtx.new
 
-    cctx.set_parameter(:maxBlockSize, 131072)
-    assert_equal(131072, cctx.get_parameter(:maxBlockSize))
+    cctx.max_block_size = 131072
+    assert_equal(131072, cctx.max_block_size)
   end
 
   def test_search_for_external_repcodes_parameter
     cctx = VibeZstd::CCtx.new
 
     # ZSTD_ps_auto = 0, ZSTD_ps_enable = 1, ZSTD_ps_disable = 2
-    cctx.set_parameter(:searchForExternalRepcodes, 1)
-    assert_equal(1, cctx.get_parameter(:searchForExternalRepcodes))
+    cctx.search_for_external_repcodes = 1
+    assert_equal(1, cctx.search_for_external_repcodes)
   end
 
   def test_experimental_parameter_name_variants
     cctx = VibeZstd::CCtx.new
 
     # Test both snake_case and camelCase work for experimental parameters
-    cctx.set_parameter(:force_max_window, 1)
-    assert_equal(1, cctx.get_parameter(:forceMaxWindow))
+    cctx.force_max_window = 1
+    assert_equal(true, cctx.force_max_window)
 
-    cctx.set_parameter(:src_size_hint, 5000)
-    assert_equal(5000, cctx.get_parameter(:srcSizeHint))
+    cctx.src_size_hint = 5000
+    assert_equal(5000, cctx.src_size_hint)
 
-    cctx.set_parameter(:literal_compression_mode, 2)
-    assert_equal(2, cctx.get_parameter(:literalCompressionMode))
+    cctx.literal_compression_mode = 2
+    assert_equal(2, cctx.literal_compression_mode)
   end
 
   def test_experimental_parameter_bounds
@@ -1051,7 +1047,275 @@ class TestVibeZstd < Minitest::Test
     bounds = VibeZstd::CCtx.parameter_bounds(:format)
     assert_kind_of(Hash, bounds)
 
-    bounds = VibeZstd::CCtx.parameter_bounds(:literalCompressionMode)
+    bounds = VibeZstd::CCtx.parameter_bounds(:literal_compression_mode)
     assert_kind_of(Hash, bounds)
+  end
+
+  # Tests for idiomatic Ruby boolean API (items #1 and #9 from PLAN.md)
+  def test_boolean_api_with_ruby_booleans
+    cctx = VibeZstd::CCtx.new
+
+    # Test setting with Ruby true/false
+    cctx.checksum = true
+    assert_equal(true, cctx.checksum)
+    assert_equal(true, cctx.checksum?)
+
+    cctx.checksum = false
+    assert_equal(false, cctx.checksum)
+    assert_equal(false, cctx.checksum?)
+
+    # Test content_size alias
+    cctx.content_size = true
+    assert_equal(true, cctx.content_size)
+    assert_equal(true, cctx.content_size?)
+    assert_equal(true, cctx.content_size_flag)
+
+    # Test dict_id alias
+    cctx.dict_id = false
+    assert_equal(false, cctx.dict_id)
+    assert_equal(false, cctx.dict_id?)
+    assert_equal(false, cctx.dict_id_flag)
+  end
+
+  def test_boolean_api_predicate_methods
+    cctx = VibeZstd::CCtx.new
+
+    # Test predicate methods for various boolean parameters
+    cctx.rsyncable = true
+    assert(cctx.rsyncable?)
+
+    cctx.force_max_window = true
+    assert(cctx.force_max_window?)
+
+    cctx.stable_in_buffer = false
+    refute(cctx.stable_in_buffer?)
+
+    cctx.long_distance_matching = true
+    assert(cctx.long_distance_matching?)
+    assert(cctx.enable_long_distance_matching)
+  end
+
+  def test_boolean_api_backward_compatibility
+    cctx = VibeZstd::CCtx.new
+
+    # Old integer API still works
+    cctx.checksum_flag = 1
+    assert_equal(true, cctx.checksum_flag)
+    assert_equal(true, cctx.checksum)
+
+    cctx.checksum_flag = 0
+    assert_equal(false, cctx.checksum_flag)
+    assert_equal(false, cctx.checksum)
+
+    # Can still use integers with new names
+    cctx.checksum = 1
+    assert_equal(true, cctx.checksum)
+
+    cctx.checksum = 0
+    assert_equal(false, cctx.checksum)
+  end
+
+  def test_boolean_api_in_compression
+    cctx = VibeZstd::CCtx.new
+    dctx = VibeZstd::DCtx.new
+
+    # Use boolean API in actual compression
+    cctx.checksum = true
+    cctx.content_size = true
+
+    data = "Test data with idiomatic Ruby boolean API"
+    compressed = cctx.compress(data)
+    decompressed = dctx.decompress(compressed)
+
+    assert_equal(data, decompressed)
+
+    # Verify content size was set
+    size = VibeZstd.frame_content_size(compressed)
+    assert_equal(data.bytesize, size)
+  end
+
+  # Tests for convenient aliases (item #6 from PLAN.md)
+  def test_level_alias
+    cctx = VibeZstd::CCtx.new
+    dctx = VibeZstd::DCtx.new
+
+    # Test short form
+    cctx.level = 9
+    assert_equal(9, cctx.level)
+    assert_equal(9, cctx.compression_level)
+
+    # Test compression works with alias
+    data = "Test data for level alias " * 50
+    compressed = cctx.compress(data)
+    decompressed = dctx.decompress(compressed)
+    assert_equal(data, decompressed)
+  end
+
+  def test_workers_alias
+    cctx = VibeZstd::CCtx.new
+    dctx = VibeZstd::DCtx.new
+
+    # Test natural English alias
+    cctx.workers = 4
+    assert_equal(4, cctx.workers)
+    assert_equal(4, cctx.nb_workers)
+
+    # Test compression works with alias
+    data = "Test data for workers alias " * 100
+    compressed = cctx.compress(data)
+    decompressed = dctx.decompress(compressed)
+    assert_equal(data, decompressed)
+  end
+
+  def test_max_window_log_alias
+    dctx = VibeZstd::DCtx.new
+    cctx = VibeZstd::CCtx.new
+
+    # Test more natural ordering
+    dctx.max_window_log = 20
+    assert_equal(20, dctx.max_window_log)
+    assert_equal(20, dctx.window_log_max)
+
+    # Test decompression works with alias
+    cctx.window_log = 20
+    data = "Test data for max_window_log alias"
+    compressed = cctx.compress(data)
+    decompressed = dctx.decompress(compressed)
+    assert_equal(data, decompressed)
+  end
+
+  def test_all_aliases_together
+    cctx = VibeZstd::CCtx.new
+    dctx = VibeZstd::DCtx.new
+
+    # Use all aliases together
+    cctx.level = 7
+    cctx.workers = 2
+    dctx.max_window_log = 25
+
+    data = "Test all convenient aliases together " * 200
+
+    compressed = cctx.compress(data)
+    decompressed = dctx.decompress(compressed)
+
+    assert_equal(data, decompressed)
+
+    # Verify aliases still work for reading
+    assert_equal(7, cctx.level)
+    assert_equal(2, cctx.workers)
+    assert_equal(25, dctx.max_window_log)
+  end
+
+  # Tests for block-based resource management (item #5 from PLAN.md)
+  def test_writer_open_with_block
+    require "stringio"
+
+    data = "Test data for block-based Writer " * 100
+    output = StringIO.new
+
+    # Block form automatically calls finish
+    VibeZstd::Compress::Writer.open(output, level: 5) do |writer|
+      writer.write(data)
+      # finish called automatically on block exit
+    end
+
+    compressed = output.string
+
+    # Verify compression worked
+    decompressed = VibeZstd.decompress(compressed)
+    assert_equal(data, decompressed)
+  end
+
+  def test_writer_open_without_block
+    require "stringio"
+
+    data = "Test data for non-block Writer.open"
+    output = StringIO.new
+
+    # Without block, returns writer and doesn't call finish
+    writer = VibeZstd::Compress::Writer.open(output, level: 5)
+    writer.write(data)
+    writer.finish
+
+    compressed = output.string
+    decompressed = VibeZstd.decompress(compressed)
+    assert_equal(data, decompressed)
+  end
+
+  def test_writer_open_with_exception
+    require "stringio"
+
+    output = StringIO.new
+    exception_raised = false
+
+    begin
+      VibeZstd::Compress::Writer.open(output, level: 5) do |writer|
+        writer.write("some data")
+        raise "Test exception"
+      end
+    rescue
+      exception_raised = true
+    end
+
+    assert(exception_raised, "Exception should have been raised")
+
+    # Finish should have been called despite exception
+    compressed = output.string
+    assert(compressed.bytesize > 0, "Data should have been written")
+  end
+
+  def test_reader_open_with_block
+    require "stringio"
+
+    data = "Test data for block-based Reader " * 100
+    compressed = VibeZstd.compress(data)
+    input = StringIO.new(compressed)
+
+    # Block form automatically handles cleanup
+    decompressed = nil
+    VibeZstd::Decompress::Reader.open(input) do |reader|
+      decompressed = reader.read
+      # Cleanup happens automatically on block exit
+    end
+
+    assert_equal(data, decompressed)
+  end
+
+  def test_reader_open_without_block
+    require "stringio"
+
+    data = "Test data for non-block Reader.open"
+    compressed = VibeZstd.compress(data)
+    input = StringIO.new(compressed)
+
+    # Without block, returns reader
+    reader = VibeZstd::Decompress::Reader.open(input)
+    decompressed = reader.read
+
+    assert_equal(data, decompressed)
+  end
+
+  def test_writer_open_with_dictionary
+    require "stringio"
+
+    dict_data = "hello world! "
+    cdict = VibeZstd::CDict.new(dict_data, 3)
+    ddict = VibeZstd::DDict.new(dict_data)
+
+    data = "hello world! " * 100
+    output = StringIO.new
+
+    # Test block form with dictionary
+    VibeZstd::Compress::Writer.open(output, level: 5, dict: cdict) do |writer|
+      writer.write(data)
+    end
+
+    compressed = output.string
+
+    # Verify decompression with dictionary using Reader
+    input = StringIO.new(compressed)
+    reader = VibeZstd::Decompress::Reader.new(input, dict: ddict)
+    decompressed = reader.read
+    assert_equal(data, decompressed)
   end
 end
