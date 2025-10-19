@@ -32,6 +32,7 @@ typedef struct {
     VALUE io;
     ZSTD_inBuffer input;  // Zstandard manages the buffer state
     VALUE input_data;      // Ruby string holding input data
+    int eof;               // Flag to track if we've reached end of stream
 } vibe_zstd_dstream;
 
 // TypedData types
@@ -47,8 +48,6 @@ extern VALUE rb_cVibeZstdCCtx;
 extern VALUE rb_cVibeZstdDCtx;
 extern VALUE rb_cVibeZstdCDict;
 extern VALUE rb_cVibeZstdDDict;
-extern VALUE rb_mVibeZstdCompress;
-extern VALUE rb_mVibeZstdDecompress;
 extern VALUE rb_cVibeZstdCompressWriter;
 extern VALUE rb_cVibeZstdDecompressReader;
 

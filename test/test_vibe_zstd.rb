@@ -68,7 +68,7 @@ class TestVibeZstd < Minitest::Test
     data = "hello world! " * 1000
     output = StringIO.new
 
-    writer = VibeZstd::Compress::Writer.new(output, level: 5)
+    writer = VibeZstd::CompressWriter.new(output, level: 5)
 
     # Write in chunks
     data.chars.each_slice(100) do |chunk|
@@ -90,7 +90,7 @@ class TestVibeZstd < Minitest::Test
     compressed = VibeZstd.compress(data, level: 5)
 
     input = StringIO.new(compressed)
-    reader = VibeZstd::Decompress::Reader.new(input)
+    reader = VibeZstd::DecompressReader.new(input)
 
     # Read all at once
     decompressed = reader.read
@@ -108,7 +108,7 @@ class TestVibeZstd < Minitest::Test
     output = StringIO.new
 
     # Compress with dictionary
-    writer = VibeZstd::Compress::Writer.new(output, level: 5, dict: cdict)
+    writer = VibeZstd::CompressWriter.new(output, level: 5, dict: cdict)
     writer.write(data)
     writer.finish
 
@@ -116,7 +116,7 @@ class TestVibeZstd < Minitest::Test
 
     # Decompress with dictionary
     input = StringIO.new(compressed)
-    reader = VibeZstd::Decompress::Reader.new(input, dict: ddict)
+    reader = VibeZstd::DecompressReader.new(input, dict: ddict)
     decompressed = reader.read
 
     assert_equal(data, decompressed)
@@ -129,7 +129,7 @@ class TestVibeZstd < Minitest::Test
     compressed = VibeZstd.compress(data)
 
     input = StringIO.new(compressed)
-    reader = VibeZstd::Decompress::Reader.new(input)
+    reader = VibeZstd::DecompressReader.new(input)
 
     # Read in small chunks and collect
     chunks = []
@@ -318,7 +318,7 @@ class TestVibeZstd < Minitest::Test
     output = StringIO.new
 
     # Create writer with pledged source size
-    writer = VibeZstd::Compress::Writer.new(output, level: 5, pledged_size: data.bytesize)
+    writer = VibeZstd::CompressWriter.new(output, level: 5, pledged_size: data.bytesize)
     writer.write(data)
     writer.finish
 
@@ -1214,7 +1214,7 @@ class TestVibeZstd < Minitest::Test
     output = StringIO.new
 
     # Block form automatically calls finish
-    VibeZstd::Compress::Writer.open(output, level: 5) do |writer|
+    VibeZstd::CompressWriter.open(output, level: 5) do |writer|
       writer.write(data)
       # finish called automatically on block exit
     end
@@ -1233,7 +1233,7 @@ class TestVibeZstd < Minitest::Test
     output = StringIO.new
 
     # Without block, returns writer and doesn't call finish
-    writer = VibeZstd::Compress::Writer.open(output, level: 5)
+    writer = VibeZstd::CompressWriter.open(output, level: 5)
     writer.write(data)
     writer.finish
 
@@ -1249,7 +1249,7 @@ class TestVibeZstd < Minitest::Test
     exception_raised = false
 
     begin
-      VibeZstd::Compress::Writer.open(output, level: 5) do |writer|
+      VibeZstd::CompressWriter.open(output, level: 5) do |writer|
         writer.write("some data")
         raise "Test exception"
       end
@@ -1273,7 +1273,7 @@ class TestVibeZstd < Minitest::Test
 
     # Block form automatically handles cleanup
     decompressed = nil
-    VibeZstd::Decompress::Reader.open(input) do |reader|
+    VibeZstd::DecompressReader.open(input) do |reader|
       decompressed = reader.read
       # Cleanup happens automatically on block exit
     end
@@ -1289,7 +1289,7 @@ class TestVibeZstd < Minitest::Test
     input = StringIO.new(compressed)
 
     # Without block, returns reader
-    reader = VibeZstd::Decompress::Reader.open(input)
+    reader = VibeZstd::DecompressReader.open(input)
     decompressed = reader.read
 
     assert_equal(data, decompressed)
@@ -1306,7 +1306,7 @@ class TestVibeZstd < Minitest::Test
     output = StringIO.new
 
     # Test block form with dictionary
-    VibeZstd::Compress::Writer.open(output, level: 5, dict: cdict) do |writer|
+    VibeZstd::CompressWriter.open(output, level: 5, dict: cdict) do |writer|
       writer.write(data)
     end
 
@@ -1314,8 +1314,574 @@ class TestVibeZstd < Minitest::Test
 
     # Verify decompression with dictionary using Reader
     input = StringIO.new(compressed)
-    reader = VibeZstd::Decompress::Reader.new(input, dict: ddict)
+    reader = VibeZstd::DecompressReader.new(input, dict: ddict)
     decompressed = reader.read
     assert_equal(data, decompressed)
+  end
+
+  # Tests for library version information (item 1 from PLAN.md)
+  def test_version_number
+    version = VibeZstd.version_number
+    assert_kind_of(Integer, version)
+    assert(version > 0, "Version number should be positive")
+    # Version number format: MMmmpp (major, minor, patch)
+    # Example: 10507 for version 1.5.7
+    assert(version >= 10000, "Version should be at least 1.0.0")
+  end
+
+  def test_version_string
+    version_string = VibeZstd.version_string
+    assert_kind_of(String, version_string)
+    refute_empty(version_string)
+    # Should match format like "1.5.7"
+    assert_match(/\d+\.\d+\.\d+/, version_string)
+  end
+
+  def test_version_consistency
+    # Version number and string should be consistent
+    version_num = VibeZstd.version_number
+    version_str = VibeZstd.version_string
+
+    # Parse version string to check consistency
+    parts = version_str.split(".").map(&:to_i)
+    expected_num = parts[0] * 10000 + parts[1] * 100 + parts[2]
+
+    assert_equal(expected_num, version_num,
+      "Version number #{version_num} should match version string #{version_str}")
+  end
+
+  def test_min_compression_level
+    min_level = VibeZstd.min_compression_level
+    assert_kind_of(Integer, min_level)
+    # Should support negative levels (ultra-fast)
+    assert(min_level < 0, "Min compression level should be negative")
+    # Typically around -131072 or similar
+    assert(min_level < -1, "Min compression level should be significantly negative")
+  end
+
+  def test_max_compression_level
+    max_level = VibeZstd.max_compression_level
+    assert_kind_of(Integer, max_level)
+    # Should be at least 22
+    assert(max_level >= 22, "Max compression level should be at least 22")
+  end
+
+  def test_default_compression_level
+    default_level = VibeZstd.default_compression_level
+    assert_kind_of(Integer, default_level)
+    # Default is typically 3
+    assert(default_level >= 1, "Default level should be at least 1")
+    assert(default_level <= 10, "Default level should be reasonable (<=10)")
+  end
+
+  def test_compression_level_bounds
+    min_level = VibeZstd.min_compression_level
+    max_level = VibeZstd.max_compression_level
+    default_level = VibeZstd.default_compression_level
+
+    # Verify bounds make sense
+    assert(min_level < default_level, "Min should be less than default")
+    assert(default_level < max_level, "Default should be less than max")
+  end
+
+  def test_compression_level_aliases
+    # Test short-form aliases
+    assert_equal(VibeZstd.min_compression_level, VibeZstd.min_level)
+    assert_equal(VibeZstd.max_compression_level, VibeZstd.max_level)
+    assert_equal(VibeZstd.default_compression_level, VibeZstd.default_level)
+  end
+
+  def test_use_version_info_for_validation
+    # Practical use case: validate compression levels
+    min_level = VibeZstd.min_level
+    max_level = VibeZstd.max_level
+
+    cctx = VibeZstd::CCtx.new
+    data = "Test data for level validation"
+
+    # Test with min level
+    compressed_min = cctx.compress(data, level: min_level)
+    assert(compressed_min.bytesize > 0)
+
+    # Test with max level
+    compressed_max = cctx.compress(data, level: max_level)
+    assert(compressed_max.bytesize > 0)
+
+    # Verify both decompress correctly
+    dctx = VibeZstd::DCtx.new
+    assert_equal(data, dctx.decompress(compressed_min))
+    assert_equal(data, dctx.decompress(compressed_max))
+  end
+
+  def test_use_version_info_for_feature_detection
+    # Practical use case: feature detection based on version
+    version = VibeZstd.version_number
+
+    # All versions >= 1.3.0 should support basic features
+    if version >= 10300
+      # Test that basic compression works
+      data = "Test feature detection"
+      compressed = VibeZstd.compress(data)
+      decompressed = VibeZstd.decompress(compressed)
+      assert_equal(data, decompressed)
+    end
+  end
+
+  def test_version_info_in_error_messages
+    # Practical use case: include version in error/debug info
+    version_info = "zstd #{VibeZstd.version_string} (#{VibeZstd.version_number})"
+
+    assert_match(/zstd \d+\.\d+\.\d+ \(\d+\)/, version_info)
+  end
+
+  def test_cctx_reset_session_only
+    cctx = VibeZstd::CCtx.new
+    cctx.compression_level = 9
+    cctx.checksum_flag = true
+
+    data1 = "First compression with level 9 and checksum"
+    compressed1 = cctx.compress(data1)
+
+    # Reset session only - should keep parameters (level=9, checksum=true)
+    cctx.reset(VibeZstd::ResetDirective::SESSION)
+
+    data2 = "Second compression should keep level 9 and checksum"
+    compressed2 = cctx.compress(data2)
+
+    # Verify both decompress correctly
+    dctx = VibeZstd::DCtx.new
+    assert_equal(data1, dctx.decompress(compressed1))
+    assert_equal(data2, dctx.decompress(compressed2))
+
+    # Verify parameters were retained
+    assert_equal(9, cctx.compression_level)
+    assert_equal(true, cctx.checksum_flag)
+  end
+
+  def test_cctx_reset_parameters
+    cctx = VibeZstd::CCtx.new
+    cctx.compression_level = 9
+    cctx.checksum_flag = true
+
+    # Reset parameters to defaults
+    cctx.reset(VibeZstd::ResetDirective::PARAMETERS)
+
+    # Verify parameters were reset to defaults
+    assert_equal(VibeZstd.default_compression_level, cctx.compression_level)
+    assert_equal(false, cctx.checksum_flag)
+  end
+
+  def test_cctx_reset_both
+    cctx = VibeZstd::CCtx.new
+    cctx.compression_level = 9
+    cctx.checksum_flag = true
+
+    data1 = "First compression"
+    compressed1 = cctx.compress(data1)
+
+    # Reset both session and parameters
+    cctx.reset(VibeZstd::ResetDirective::BOTH)
+
+    # Verify parameters were reset
+    assert_equal(VibeZstd.default_compression_level, cctx.compression_level)
+    assert_equal(false, cctx.checksum_flag)
+
+    # Verify can still compress
+    data2 = "Second compression"
+    compressed2 = cctx.compress(data2)
+
+    dctx = VibeZstd::DCtx.new
+    assert_equal(data1, dctx.decompress(compressed1))
+    assert_equal(data2, dctx.decompress(compressed2))
+  end
+
+  def test_cctx_reset_default_is_both
+    cctx = VibeZstd::CCtx.new
+    cctx.compression_level = 9
+    cctx.checksum_flag = true
+
+    # Reset with no argument should default to BOTH
+    cctx.reset
+
+    # Verify parameters were reset
+    assert_equal(VibeZstd.default_compression_level, cctx.compression_level)
+    assert_equal(false, cctx.checksum_flag)
+  end
+
+  def test_cctx_reset_allows_reuse
+    # Test that reset allows efficient context reuse
+    cctx = VibeZstd::CCtx.new(level: 5)
+    dctx = VibeZstd::DCtx.new
+
+    # Compress multiple different datasets
+    results = []
+    10.times do |i|
+      data = "Dataset #{i}: " + ("x" * 100)
+      compressed = cctx.compress(data)
+      results << [data, compressed]
+
+      # Reset session for next compression
+      cctx.reset(VibeZstd::ResetDirective::SESSION)
+    end
+
+    # Verify all compressions
+    results.each do |original, compressed|
+      assert_equal(original, dctx.decompress(compressed))
+    end
+  end
+
+  def test_dctx_reset_session_only
+    dctx = VibeZstd::DCtx.new
+    dctx.window_log_max = 20
+
+    data = "Test data for decompression"
+    compressed = VibeZstd.compress(data)
+
+    # Decompress once
+    decompressed1 = dctx.decompress(compressed)
+    assert_equal(data, decompressed1)
+
+    # Reset session only - should keep parameters
+    dctx.reset(VibeZstd::ResetDirective::SESSION)
+
+    # Decompress again
+    decompressed2 = dctx.decompress(compressed)
+    assert_equal(data, decompressed2)
+
+    # Verify parameters were retained
+    assert_equal(20, dctx.window_log_max)
+  end
+
+  def test_dctx_reset_parameters
+    dctx = VibeZstd::DCtx.new
+    dctx.window_log_max = 20
+
+    # Reset parameters to defaults
+    dctx.reset(VibeZstd::ResetDirective::PARAMETERS)
+
+    # Verify parameters were reset
+    # window_log_max default is 27
+    assert_equal(27, dctx.window_log_max)
+  end
+
+  def test_dctx_reset_both
+    dctx = VibeZstd::DCtx.new
+    dctx.window_log_max = 20
+
+    data = "Test data"
+    compressed = VibeZstd.compress(data)
+
+    # Decompress once
+    decompressed1 = dctx.decompress(compressed)
+    assert_equal(data, decompressed1)
+
+    # Reset both
+    dctx.reset(VibeZstd::ResetDirective::BOTH)
+
+    # Verify parameters were reset
+    assert_equal(27, dctx.window_log_max)
+
+    # Verify can still decompress
+    decompressed2 = dctx.decompress(compressed)
+    assert_equal(data, decompressed2)
+  end
+
+  def test_dctx_reset_default_is_both
+    dctx = VibeZstd::DCtx.new
+    dctx.window_log_max = 20
+
+    # Reset with no argument should default to BOTH
+    dctx.reset
+
+    # Verify parameters were reset
+    assert_equal(27, dctx.window_log_max)
+  end
+
+  def test_dctx_reset_allows_reuse
+    # Test that reset allows efficient context reuse
+    dctx = VibeZstd::DCtx.new
+
+    # Decompress multiple different datasets
+    10.times do |i|
+      data = "Dataset #{i}: " + ("y" * 100)
+      compressed = VibeZstd.compress(data)
+
+      decompressed = dctx.decompress(compressed)
+      assert_equal(data, decompressed)
+
+      # Reset session for next decompression
+      dctx.reset(VibeZstd::ResetDirective::SESSION)
+    end
+  end
+
+  def test_reset_invalid_mode
+    cctx = VibeZstd::CCtx.new
+
+    # Test invalid reset mode
+    assert_raises(ArgumentError) do
+      cctx.reset(999)
+    end
+  end
+
+  def test_reset_constants_defined
+    # Verify reset constants are defined
+    assert_equal(1, VibeZstd::ResetDirective::SESSION)
+    assert_equal(2, VibeZstd::ResetDirective::PARAMETERS)
+    assert_equal(3, VibeZstd::ResetDirective::BOTH)
+  end
+
+  # Tests for skippable frames
+
+  def test_write_skippable_frame
+    data = "test metadata"
+    frame = VibeZstd.write_skippable_frame(data)
+
+    # Frame should be 8 bytes header + data
+    assert_equal(8 + data.bytesize, frame.bytesize)
+
+    # Should be identified as skippable
+    assert(VibeZstd.skippable_frame?(frame))
+  end
+
+  def test_write_skippable_frame_with_magic_variant
+    data = "test data"
+
+    # Test different magic variants (0-15)
+    [0, 5, 15].each do |variant|
+      frame = VibeZstd.write_skippable_frame(data, magic_number: variant)
+      assert(VibeZstd.skippable_frame?(frame))
+    end
+  end
+
+  def test_write_skippable_frame_invalid_magic_number
+    assert_raises(ArgumentError) do
+      VibeZstd.write_skippable_frame("data", magic_number: 16)
+    end
+
+    assert_raises(ArgumentError) do
+      VibeZstd.write_skippable_frame("data", magic_number: 100)
+    end
+  end
+
+  def test_read_skippable_frame
+    original_data = "test metadata content"
+    frame = VibeZstd.write_skippable_frame(original_data, magic_number: 3)
+
+    content, magic_variant = VibeZstd.read_skippable_frame(frame)
+
+    assert_equal(original_data, content)
+    assert_equal(3, magic_variant)
+  end
+
+  def test_read_skippable_frame_not_skippable
+    # Try to read a regular compressed frame as skippable
+    compressed = VibeZstd.compress("test data")
+
+    assert_raises(ArgumentError) do
+      VibeZstd.read_skippable_frame(compressed)
+    end
+  end
+
+  def test_skippable_frame_predicate
+    skippable = VibeZstd.write_skippable_frame("metadata")
+    compressed = VibeZstd.compress("data")
+
+    assert(VibeZstd.skippable_frame?(skippable))
+    refute(VibeZstd.skippable_frame?(compressed))
+  end
+
+  def test_find_frame_compressed_size_regular_frame
+    data = "test data"
+    compressed = VibeZstd.compress(data)
+
+    size = VibeZstd.find_frame_compressed_size(compressed)
+    assert_equal(compressed.bytesize, size)
+  end
+
+  def test_find_frame_compressed_size_skippable_frame
+    data = "metadata"
+    skippable = VibeZstd.write_skippable_frame(data)
+
+    size = VibeZstd.find_frame_compressed_size(skippable)
+    assert_equal(skippable.bytesize, size)
+  end
+
+  def test_find_frame_compressed_size_multi_frame
+    data1 = "first frame"
+    data2 = "second frame"
+
+    frame1 = VibeZstd.compress(data1)
+    frame2 = VibeZstd.compress(data2)
+    combined = frame1 + frame2
+
+    # Should return size of first frame only
+    size = VibeZstd.find_frame_compressed_size(combined)
+    assert_equal(frame1.bytesize, size)
+  end
+
+  def test_skippable_frame_with_compressed_data
+    # Create metadata + compressed data
+    metadata = { timestamp: Time.now.to_i, version: "1.0" }.to_json
+    data = "actual compressed data"
+
+    skippable = VibeZstd.write_skippable_frame(metadata, magic_number: 0)
+    compressed = VibeZstd.compress(data)
+    combined = skippable + compressed
+
+    # Decompressor should automatically skip the metadata frame
+    decompressed = VibeZstd.decompress(combined)
+    assert_equal(data, decompressed)
+  end
+
+  def test_skippable_frame_multiple_leading_frames
+    # Test multiple skippable frames before compressed data
+    metadata1 = "first metadata"
+    metadata2 = "second metadata"
+    data = "actual data"
+
+    skippable1 = VibeZstd.write_skippable_frame(metadata1, magic_number: 0)
+    skippable2 = VibeZstd.write_skippable_frame(metadata2, magic_number: 1)
+    compressed = VibeZstd.compress(data)
+    combined = skippable1 + skippable2 + compressed
+
+    # Should automatically skip both skippable frames
+    decompressed = VibeZstd.decompress(combined)
+    assert_equal(data, decompressed)
+  end
+
+  def test_only_skippable_frames_error
+    # Test that trying to decompress only skippable frames raises an error
+    skippable = VibeZstd.write_skippable_frame("metadata")
+
+    assert_raises(RuntimeError) do
+      VibeZstd.decompress(skippable)
+    end
+  end
+
+  def test_each_skippable_frame_single_frame
+    metadata = "test metadata"
+    frame = VibeZstd.write_skippable_frame(metadata, magic_number: 5)
+
+    results = []
+    VibeZstd.each_skippable_frame(frame) do |content, magic, offset|
+      results << [content, magic, offset]
+    end
+
+    assert_equal(1, results.size)
+    assert_equal(metadata, results[0][0])
+    assert_equal(5, results[0][1])
+    assert_equal(0, results[0][2])
+  end
+
+  def test_each_skippable_frame_multiple_frames
+    metadata1 = "first metadata"
+    metadata2 = "second metadata"
+    metadata3 = "third metadata"
+
+    frame1 = VibeZstd.write_skippable_frame(metadata1, magic_number: 0)
+    frame2 = VibeZstd.write_skippable_frame(metadata2, magic_number: 1)
+    frame3 = VibeZstd.write_skippable_frame(metadata3, magic_number: 2)
+
+    combined = frame1 + frame2 + frame3
+
+    results = []
+    VibeZstd.each_skippable_frame(combined) do |content, magic, offset|
+      results << [content, magic, offset]
+    end
+
+    assert_equal(3, results.size)
+
+    assert_equal(metadata1, results[0][0])
+    assert_equal(0, results[0][1])
+    assert_equal(0, results[0][2])
+
+    assert_equal(metadata2, results[1][0])
+    assert_equal(1, results[1][1])
+    assert_equal(frame1.bytesize, results[1][2])
+
+    assert_equal(metadata3, results[2][0])
+    assert_equal(2, results[2][1])
+    assert_equal(frame1.bytesize + frame2.bytesize, results[2][2])
+  end
+
+  def test_each_skippable_frame_mixed_with_compressed
+    metadata1 = "before compression"
+    metadata2 = "after compression"
+    data = "compressed data"
+
+    skippable1 = VibeZstd.write_skippable_frame(metadata1, magic_number: 0)
+    compressed = VibeZstd.compress(data)
+    skippable2 = VibeZstd.write_skippable_frame(metadata2, magic_number: 1)
+
+    combined = skippable1 + compressed + skippable2
+
+    results = []
+    VibeZstd.each_skippable_frame(combined) do |content, magic, offset|
+      results << [content, magic, offset]
+    end
+
+    # Should only yield the skippable frames, not the compressed frame
+    assert_equal(2, results.size)
+
+    assert_equal(metadata1, results[0][0])
+    assert_equal(0, results[0][1])
+
+    assert_equal(metadata2, results[1][0])
+    assert_equal(1, results[1][1])
+  end
+
+  def test_each_skippable_frame_returns_enumerator
+    metadata = "test"
+    frame = VibeZstd.write_skippable_frame(metadata)
+
+    enum = VibeZstd.each_skippable_frame(frame)
+    assert_instance_of(Enumerator, enum)
+
+    results = enum.to_a
+    assert_equal(1, results.size)
+    assert_equal(metadata, results[0][0])
+  end
+
+  def test_skippable_frame_archive_pattern
+    # Simulate a simple archive format
+    files = {
+      "file1.txt" => "content of file 1",
+      "file2.txt" => "content of file 2"
+    }
+
+    archive = String.new(encoding: 'BINARY')
+
+    files.each do |path, content|
+      metadata = { path: path, size: content.bytesize }.to_json
+      archive << VibeZstd.write_skippable_frame(metadata, magic_number: 0)
+      archive << VibeZstd.compress(content)
+    end
+
+    # Extract archive
+    extracted = {}
+    offset = 0
+
+    while offset < archive.bytesize
+      frame_data = archive.byteslice(offset..-1)
+      frame_size = VibeZstd.find_frame_compressed_size(frame_data)
+
+      if VibeZstd.skippable_frame?(frame_data)
+        content, _magic = VibeZstd.read_skippable_frame(frame_data)
+        metadata = JSON.parse(content)
+        offset += frame_size
+
+        # Next frame should be the compressed file
+        compressed_data = archive.byteslice(offset..-1)
+        compressed_size = VibeZstd.find_frame_compressed_size(compressed_data)
+        file_content = VibeZstd.decompress(compressed_data.byteslice(0, compressed_size))
+
+        extracted[metadata["path"]] = file_content
+        offset += compressed_size
+      else
+        offset += frame_size
+      end
+    end
+
+    assert_equal(files, extracted)
   end
 end

@@ -8,8 +8,6 @@ VALUE rb_cVibeZstdCCtx;
 VALUE rb_cVibeZstdDCtx;
 VALUE rb_cVibeZstdCDict;
 VALUE rb_cVibeZstdDDict;
-VALUE rb_mVibeZstdCompress;
-VALUE rb_mVibeZstdDecompress;
 VALUE rb_cVibeZstdCompressWriter;
 VALUE rb_cVibeZstdDecompressReader;
 
@@ -1045,6 +1043,40 @@ vibe_zstd_cctx_use_prefix(VALUE self, VALUE prefix_data) {
     return self;
 }
 
+// CCtx reset - reset context to clean state
+static VALUE
+vibe_zstd_cctx_reset(int argc, VALUE* argv, VALUE self) {
+    VALUE reset_mode;
+    rb_scan_args(argc, argv, "01", &reset_mode);
+
+    vibe_zstd_cctx* cctx;
+    TypedData_Get_Struct(self, vibe_zstd_cctx, &vibe_zstd_cctx_type, cctx);
+
+    // Default to SESSION_AND_PARAMETERS if no argument provided
+    ZSTD_ResetDirective directive = ZSTD_reset_session_and_parameters;
+
+    if (!NIL_P(reset_mode)) {
+        int mode = NUM2INT(reset_mode);
+        if (mode == ZSTD_reset_session_only) {
+            directive = ZSTD_reset_session_only;
+        } else if (mode == ZSTD_reset_parameters) {
+            directive = ZSTD_reset_parameters;
+        } else if (mode == ZSTD_reset_session_and_parameters) {
+            directive = ZSTD_reset_session_and_parameters;
+        } else {
+            rb_raise(rb_eArgError, "Invalid reset mode: must be ResetDirective::SESSION (1), PARAMETERS (2), or BOTH (3)");
+        }
+    }
+
+    size_t result = ZSTD_CCtx_reset(cctx->cctx, directive);
+
+    if (ZSTD_isError(result)) {
+        rb_raise(rb_eRuntimeError, "Failed to reset compression context: %s", ZSTD_getErrorName(result));
+    }
+
+    return self;
+}
+
 // Parameter lookup table for DCtx
 typedef struct {
     ID symbol_id;
@@ -1207,8 +1239,28 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
     vibe_zstd_dctx* dctx;
     TypedData_Get_Struct(self, vibe_zstd_dctx, &vibe_zstd_dctx_type, dctx);
     StringValue(data);
+    const char* src = RSTRING_PTR(data);
     size_t srcSize = RSTRING_LEN(data);
-    unsigned long long contentSize = ZSTD_getFrameContentSize(RSTRING_PTR(data), srcSize);
+    size_t offset = 0;
+
+    // Skip any leading skippable frames
+    while (offset < srcSize && ZSTD_isSkippableFrame(src + offset, srcSize - offset)) {
+        size_t frameSize = ZSTD_findFrameCompressedSize(src + offset, srcSize - offset);
+        if (ZSTD_isError(frameSize)) {
+            rb_raise(rb_eRuntimeError, "Invalid skippable frame: %s", ZSTD_getErrorName(frameSize));
+        }
+        offset += frameSize;
+    }
+
+    // Now check the actual compressed frame
+    if (offset >= srcSize) {
+        rb_raise(rb_eRuntimeError, "No compressed frame found (only skippable frames)");
+    }
+
+    src += offset;
+    srcSize -= offset;
+
+    unsigned long long contentSize = ZSTD_getFrameContentSize(src, srcSize);
     if (contentSize == ZSTD_CONTENTSIZE_ERROR) {
         rb_raise(rb_eRuntimeError, "Invalid compressed data");
     }
@@ -1230,7 +1282,7 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
         VALUE result = rb_str_new(NULL, 0);
         VALUE tmpBuffer = rb_str_buf_new(dstCapacity);
 
-        ZSTD_inBuffer input = { RSTRING_PTR(data), srcSize, 0 };
+        ZSTD_inBuffer input = { src, srcSize, 0 };
 
         while (input.pos < input.size) {
             ZSTD_outBuffer output = { RSTRING_PTR(tmpBuffer), dstCapacity, 0 };
@@ -1251,7 +1303,7 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
     decompress_args args = {
         .dctx = dctx->dctx,
         .ddict = ddict,
-        .src = RSTRING_PTR(data),
+        .src = src,
         .srcSize = srcSize,
         .dst = RSTRING_PTR(result),
         .dstCapacity = contentSize,
@@ -1282,6 +1334,40 @@ vibe_zstd_dctx_use_prefix(VALUE self, VALUE prefix_data) {
     return self;
 }
 
+// DCtx reset - reset context to clean state
+static VALUE
+vibe_zstd_dctx_reset(int argc, VALUE* argv, VALUE self) {
+    VALUE reset_mode;
+    rb_scan_args(argc, argv, "01", &reset_mode);
+
+    vibe_zstd_dctx* dctx;
+    TypedData_Get_Struct(self, vibe_zstd_dctx, &vibe_zstd_dctx_type, dctx);
+
+    // Default to SESSION_AND_PARAMETERS if no argument provided
+    ZSTD_ResetDirective directive = ZSTD_reset_session_and_parameters;
+
+    if (!NIL_P(reset_mode)) {
+        int mode = NUM2INT(reset_mode);
+        if (mode == ZSTD_reset_session_only) {
+            directive = ZSTD_reset_session_only;
+        } else if (mode == ZSTD_reset_parameters) {
+            directive = ZSTD_reset_parameters;
+        } else if (mode == ZSTD_reset_session_and_parameters) {
+            directive = ZSTD_reset_session_and_parameters;
+        } else {
+            rb_raise(rb_eArgError, "Invalid reset mode: must be ResetDirective::SESSION (1), PARAMETERS (2), or BOTH (3)");
+        }
+    }
+
+    size_t result = ZSTD_DCtx_reset(dctx->dctx, directive);
+
+    if (ZSTD_isError(result)) {
+        rb_raise(rb_eRuntimeError, "Failed to reset decompression context: %s", ZSTD_getErrorName(result));
+    }
+
+    return self;
+}
+
 // Streaming API - Writer
 static VALUE
 vibe_zstd_writer_initialize(int argc, VALUE *argv, VALUE self) {
@@ -1290,6 +1376,11 @@ vibe_zstd_writer_initialize(int argc, VALUE *argv, VALUE self) {
 
     vibe_zstd_cstream* cstream;
     TypedData_Get_Struct(self, vibe_zstd_cstream, &vibe_zstd_cstream_type, cstream);
+
+    // Validate IO object responds to write (duck typing)
+    if (!rb_respond_to(io, rb_intern("write"))) {
+        rb_raise(rb_eTypeError, "IO object must respond to write");
+    }
 
     // Store IO object
     cstream->io = io;
@@ -1465,6 +1556,11 @@ vibe_zstd_reader_initialize(int argc, VALUE *argv, VALUE self) {
     vibe_zstd_dstream* dstream;
     TypedData_Get_Struct(self, vibe_zstd_dstream, &vibe_zstd_dstream_type, dstream);
 
+    // Validate IO object responds to read (duck typing)
+    if (!rb_respond_to(io, rb_intern("read"))) {
+        rb_raise(rb_eTypeError, "IO object must respond to read");
+    }
+
     // Store IO object
     dstream->io = io;
     rb_ivar_set(self, rb_intern("@io"), io);
@@ -1503,6 +1599,7 @@ vibe_zstd_reader_initialize(int argc, VALUE *argv, VALUE self) {
     dstream->input.src = NULL;
     dstream->input.size = 0;
     dstream->input.pos = 0;
+    dstream->eof = 0;
     rb_ivar_set(self, rb_intern("@input_data"), dstream->input_data);
 
     return self;
@@ -1515,6 +1612,11 @@ vibe_zstd_reader_read(int argc, VALUE *argv, VALUE self) {
 
     vibe_zstd_dstream* dstream;
     TypedData_Get_Struct(self, vibe_zstd_dstream, &vibe_zstd_dstream_type, dstream);
+
+    // If already at EOF, return nil
+    if (dstream->eof) {
+        return Qnil;
+    }
 
     size_t requested_size = NIL_P(size_arg) ? 0 : NUM2SIZET(size_arg);
     size_t inBufferSize = ZSTD_DStreamInSize();
@@ -1532,6 +1634,7 @@ vibe_zstd_reader_read(int argc, VALUE *argv, VALUE self) {
             VALUE chunk = rb_funcall(dstream->io, rb_intern("read"), 1, SIZET2NUM(inBufferSize));
             if (NIL_P(chunk)) {
                 // EOF from IO
+                dstream->eof = 1;
                 if (total_read == 0 && !made_progress) {
                     return Qnil;
                 }
@@ -1546,6 +1649,7 @@ vibe_zstd_reader_read(int argc, VALUE *argv, VALUE self) {
 
         // If we have no more input, we're done
         if (dstream->input.size == 0) {
+            dstream->eof = 1;
             break;
         }
 
@@ -1576,6 +1680,7 @@ vibe_zstd_reader_read(int argc, VALUE *argv, VALUE self) {
 
         // If frame is complete (ret == 0), we're done
         if (ret == 0) {
+            dstream->eof = 1;
             break;
         }
 
@@ -1586,11 +1691,160 @@ vibe_zstd_reader_read(int argc, VALUE *argv, VALUE self) {
     }
 
     if (total_read == 0) {
+        dstream->eof = 1;
         return Qnil;
     }
 
     rb_str_set_len(result, total_read);
     return result;
+}
+
+static VALUE
+vibe_zstd_reader_eof(VALUE self) {
+    vibe_zstd_dstream* dstream;
+    TypedData_Get_Struct(self, vibe_zstd_dstream, &vibe_zstd_dstream_type, dstream);
+    return dstream->eof ? Qtrue : Qfalse;
+}
+
+// Skippable frame functions
+static VALUE
+vibe_zstd_skippable_frame_p(VALUE self, VALUE data) {
+    (void)self;
+    StringValue(data);
+    unsigned result = ZSTD_isSkippableFrame(RSTRING_PTR(data), RSTRING_LEN(data));
+    return result ? Qtrue : Qfalse;
+}
+
+static VALUE
+vibe_zstd_write_skippable_frame(int argc, VALUE *argv, VALUE self) {
+    (void)self;
+    VALUE data, options;
+    rb_scan_args(argc, argv, "11", &data, &options);
+
+    StringValue(data);
+
+    unsigned magic_variant = 0;  // Default to 0
+    if (!NIL_P(options)) {
+        Check_Type(options, T_HASH);
+        VALUE magic_num = rb_hash_aref(options, ID2SYM(rb_intern("magic_number")));
+        if (!NIL_P(magic_num)) {
+            magic_variant = NUM2UINT(magic_num);
+            if (magic_variant > 15) {
+                rb_raise(rb_eArgError, "magic_number must be between 0 and 15");
+            }
+        }
+    }
+
+    const char* src = RSTRING_PTR(data);
+    size_t src_size = RSTRING_LEN(data);
+
+    // Frame size = 4 byte magic + 4 byte frame size + content
+    size_t frame_size = 8 + src_size;
+    VALUE result = rb_str_buf_new(frame_size);
+
+    size_t written = ZSTD_writeSkippableFrame(
+        RSTRING_PTR(result),
+        frame_size,
+        src,
+        src_size,
+        magic_variant
+    );
+
+    if (ZSTD_isError(written)) {
+        rb_raise(rb_eRuntimeError, "ZSTD error: %s", ZSTD_getErrorName(written));
+    }
+
+    rb_str_set_len(result, written);
+    return result;
+}
+
+static VALUE
+vibe_zstd_read_skippable_frame(VALUE self, VALUE data) {
+    (void)self;
+    StringValue(data);
+
+    if (!ZSTD_isSkippableFrame(RSTRING_PTR(data), RSTRING_LEN(data))) {
+        rb_raise(rb_eArgError, "data is not a skippable frame");
+    }
+
+    const char* src = RSTRING_PTR(data);
+    size_t src_size = RSTRING_LEN(data);
+
+    // Content size is in bytes 4-7 (little-endian uint32)
+    if (src_size < 8) {
+        rb_raise(rb_eArgError, "skippable frame too small");
+    }
+
+    uint32_t content_size;
+    memcpy(&content_size, src + 4, 4);
+
+    VALUE result = rb_str_buf_new(content_size);
+    unsigned magic_variant;
+
+    size_t bytes_read = ZSTD_readSkippableFrame(
+        RSTRING_PTR(result),
+        content_size,
+        &magic_variant,
+        src,
+        src_size
+    );
+
+    if (ZSTD_isError(bytes_read)) {
+        rb_raise(rb_eRuntimeError, "ZSTD error: %s", ZSTD_getErrorName(bytes_read));
+    }
+
+    rb_str_set_len(result, bytes_read);
+
+    // Return [content, magic_variant]
+    VALUE result_ary = rb_ary_new_capa(2);
+    rb_ary_push(result_ary, result);
+    rb_ary_push(result_ary, UINT2NUM(magic_variant));
+    return result_ary;
+}
+
+static VALUE
+vibe_zstd_find_frame_compressed_size(VALUE self, VALUE data) {
+    (void)self;
+    StringValue(data);
+
+    size_t frame_size = ZSTD_findFrameCompressedSize(RSTRING_PTR(data), RSTRING_LEN(data));
+
+    if (ZSTD_isError(frame_size)) {
+        rb_raise(rb_eRuntimeError, "ZSTD error: %s", ZSTD_getErrorName(frame_size));
+    }
+
+    return SIZET2NUM(frame_size);
+}
+
+// Library version information
+static VALUE
+vibe_zstd_version_number(VALUE self) {
+    (void)self;
+    return UINT2NUM(ZSTD_versionNumber());
+}
+
+static VALUE
+vibe_zstd_version_string(VALUE self) {
+    (void)self;
+    return rb_str_new_cstr(ZSTD_versionString());
+}
+
+static VALUE
+vibe_zstd_min_c_level(VALUE self) {
+    (void)self;
+    return INT2NUM(ZSTD_minCLevel());
+}
+
+static VALUE
+vibe_zstd_max_c_level(VALUE self) {
+    (void)self;
+    return INT2NUM(ZSTD_maxCLevel());
+}
+
+static VALUE
+vibe_zstd_default_c_level(VALUE self) {
+    (void)self;
+    return INT2NUM(ZSTD_defaultCLevel());
 }
 
 RUBY_FUNC_EXPORTED void
@@ -1613,6 +1867,7 @@ Init_vibe_zstd(void)
   rb_define_method(rb_cVibeZstdCCtx, "initialize", vibe_zstd_cctx_initialize, -1);
   rb_define_method(rb_cVibeZstdCCtx, "compress", vibe_zstd_cctx_compress, -1);
   rb_define_method(rb_cVibeZstdCCtx, "use_prefix", vibe_zstd_cctx_use_prefix, 1);
+  rb_define_method(rb_cVibeZstdCCtx, "reset", vibe_zstd_cctx_reset, -1);
   rb_define_singleton_method(rb_cVibeZstdCCtx, "parameter_bounds", vibe_zstd_cctx_parameter_bounds, 1);
   rb_define_singleton_method(rb_cVibeZstdCCtx, "estimate_memory", vibe_zstd_cctx_estimate_memory, 1);
 
@@ -1724,6 +1979,7 @@ Init_vibe_zstd(void)
    rb_define_method(rb_cVibeZstdDCtx, "initialize", vibe_zstd_dctx_initialize, -1);
    rb_define_method(rb_cVibeZstdDCtx, "decompress", vibe_zstd_dctx_decompress, -1);
    rb_define_method(rb_cVibeZstdDCtx, "use_prefix", vibe_zstd_dctx_use_prefix, 1);
+   rb_define_method(rb_cVibeZstdDCtx, "reset", vibe_zstd_dctx_reset, -1);
    rb_define_singleton_method(rb_cVibeZstdDCtx, "parameter_bounds", vibe_zstd_dctx_parameter_bounds, 1);
    rb_define_singleton_method(rb_cVibeZstdDCtx, "frame_content_size", vibe_zstd_dctx_frame_content_size, 1);
    rb_define_singleton_method(rb_cVibeZstdDCtx, "estimate_memory", vibe_zstd_dctx_estimate_memory, 0);
@@ -1758,12 +2014,21 @@ Init_vibe_zstd(void)
   // Module-level utility methods
   rb_define_module_function(rb_mVibeZstd, "compress_bound", vibe_zstd_compress_bound, 1);
 
-  // Define modules
-  rb_mVibeZstdCompress = rb_define_module_under(rb_mVibeZstd, "Compress");
-  rb_mVibeZstdDecompress = rb_define_module_under(rb_mVibeZstd, "Decompress");
+  // Module-level version information
+  rb_define_module_function(rb_mVibeZstd, "version_number", vibe_zstd_version_number, 0);
+  rb_define_module_function(rb_mVibeZstd, "version_string", vibe_zstd_version_string, 0);
+  rb_define_module_function(rb_mVibeZstd, "min_compression_level", vibe_zstd_min_c_level, 0);
+  rb_define_module_function(rb_mVibeZstd, "max_compression_level", vibe_zstd_max_c_level, 0);
+  rb_define_module_function(rb_mVibeZstd, "default_compression_level", vibe_zstd_default_c_level, 0);
 
-  // Streaming API - Writer
-  rb_cVibeZstdCompressWriter = rb_define_class_under(rb_mVibeZstdCompress, "Writer", rb_cObject);
+  // Module-level skippable frame functions
+  rb_define_module_function(rb_mVibeZstd, "skippable_frame?", vibe_zstd_skippable_frame_p, 1);
+  rb_define_module_function(rb_mVibeZstd, "write_skippable_frame", vibe_zstd_write_skippable_frame, -1);
+  rb_define_module_function(rb_mVibeZstd, "read_skippable_frame", vibe_zstd_read_skippable_frame, 1);
+  rb_define_module_function(rb_mVibeZstd, "find_frame_compressed_size", vibe_zstd_find_frame_compressed_size, 1);
+
+  // Streaming API - CompressWriter (flat namespace)
+  rb_cVibeZstdCompressWriter = rb_define_class_under(rb_mVibeZstd, "CompressWriter", rb_cObject);
   rb_define_alloc_func(rb_cVibeZstdCompressWriter, vibe_zstd_cstream_alloc);
   rb_define_method(rb_cVibeZstdCompressWriter, "initialize", vibe_zstd_writer_initialize, -1);
   rb_define_method(rb_cVibeZstdCompressWriter, "write", vibe_zstd_writer_write, 1);
@@ -1771,9 +2036,10 @@ Init_vibe_zstd(void)
   rb_define_method(rb_cVibeZstdCompressWriter, "finish", vibe_zstd_writer_finish, 0);
   rb_define_method(rb_cVibeZstdCompressWriter, "close", vibe_zstd_writer_finish, 0); // alias
 
-  // Streaming API - Reader
-  rb_cVibeZstdDecompressReader = rb_define_class_under(rb_mVibeZstdDecompress, "Reader", rb_cObject);
+  // Streaming API - DecompressReader (flat namespace)
+  rb_cVibeZstdDecompressReader = rb_define_class_under(rb_mVibeZstd, "DecompressReader", rb_cObject);
   rb_define_alloc_func(rb_cVibeZstdDecompressReader, vibe_zstd_dstream_alloc);
   rb_define_method(rb_cVibeZstdDecompressReader, "initialize", vibe_zstd_reader_initialize, -1);
   rb_define_method(rb_cVibeZstdDecompressReader, "read", vibe_zstd_reader_read, -1);
+  rb_define_method(rb_cVibeZstdDecompressReader, "eof?", vibe_zstd_reader_eof, 0);
 }
