@@ -4,14 +4,24 @@ module VibeZstd
   # Compression context for reusable compression operations
   class CCtx
     def initialize: () -> void
-    def compress: (String data, ?Integer? level, ?CDict? dict) -> String
+    def compress: (String data, ?Integer? level, ?CDict? dict, ?pledged_size: Integer?) -> String
+    def set_parameter: (Symbol param, Integer value) -> self
+    def get_parameter: (Symbol param) -> Integer
+    def use_prefix: (String prefix_data) -> self
+    def self.parameter_bounds: (Symbol param) -> Hash[Symbol, Integer]
+    def self.estimate_memory: (Integer level) -> Integer
   end
 
   # Decompression context for reusable decompression operations
   class DCtx
     def initialize: () -> void
     def decompress: (String data, ?DDict? dict) -> String
+    def set_parameter: (Symbol param, Integer value) -> self
+    def get_parameter: (Symbol param) -> Integer
+    def use_prefix: (String prefix_data) -> self
+    def self.parameter_bounds: (Symbol param) -> Hash[Symbol, Integer]
     def self.frame_content_size: (String data) -> Integer?
+    def self.estimate_memory: () -> Integer
   end
 
   # Pre-digested compression dictionary
@@ -19,6 +29,7 @@ module VibeZstd
     def initialize: (String dict_data, ?Integer? level) -> void
     def size: () -> Integer
     def dict_id: () -> Integer
+    def self.estimate_memory: (Integer dict_size, Integer level) -> Integer
   end
 
   # Pre-digested decompression dictionary
@@ -26,12 +37,13 @@ module VibeZstd
     def initialize: (String dict_data) -> void
     def size: () -> Integer
     def dict_id: () -> Integer
+    def self.estimate_memory: (Integer dict_size) -> Integer
   end
 
   module Compress
     # Streaming compression writer
     class Writer
-      def initialize: (IO io, ?level: Integer?, ?dict: CDict?) -> void
+      def initialize: (IO io, ?level: Integer?, ?dict: CDict?, ?pledged_size: Integer?) -> void
       def write: (String data) -> self
       def flush: () -> self
       def finish: () -> self
@@ -51,4 +63,14 @@ module VibeZstd
   def self.compress: (String data, ?level: Integer?, ?dict: CDict?) -> String
   def self.decompress: (String data, ?dict: DDict?) -> String
   def self.frame_content_size: (String data) -> Integer?
+
+  # Dictionary training and utilities
+  def self.train_dict: (Array[String] samples, ?max_dict_size: Integer?) -> String
+  def self.train_dict_cover: (Array[String] samples, ?max_dict_size: Integer?, ?k: Integer?, ?d: Integer?, ?steps: Integer?, ?split_point: Float?, ?shrink_dict: bool?, ?shrink_dict_max_regression: Integer?, ?nb_threads: Integer?) -> String
+  def self.train_dict_fast_cover: (Array[String] samples, ?max_dict_size: Integer?, ?k: Integer?, ?d: Integer?, ?f: Integer?, ?steps: Integer?, ?split_point: Float?, ?accel: Integer?, ?shrink_dict: bool?, ?shrink_dict_max_regression: Integer?, ?nb_threads: Integer?) -> String
+  def self.get_dict_id: (String dict_data) -> Integer
+  def self.get_dict_id_from_frame: (String data) -> Integer
+
+  # Compression utilities
+  def self.compress_bound: (Integer size) -> Integer
 end

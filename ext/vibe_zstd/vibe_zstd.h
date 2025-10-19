@@ -2,6 +2,7 @@
 #define VIBE_ZSTD_H 1
 
 #include "ruby.h"
+#define ZSTD_STATIC_LINKING_ONLY
 #include <zstd.h>
 
 // TypedData structs

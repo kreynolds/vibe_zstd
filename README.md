@@ -61,6 +61,33 @@ puts "Decompressed: #{decompressed}"
 compressed = cctx.compress(data, 5)
 ```
 
+### Advanced Compression Parameters
+
+```ruby
+require 'vibe_zstd'
+
+cctx = VibeZstd::CCtx.new
+dctx = VibeZstd::DCtx.new
+
+# Enable checksum for data integrity
+cctx.set_parameter(:checksumFlag, 1)
+
+# Include content size in frame header
+cctx.set_parameter(:contentSizeFlag, 1)
+
+# Use multi-threaded compression (4 threads)
+cctx.set_parameter(:nbWorkers, 4)
+
+# Parameters can be chained
+cctx
+  .set_parameter(:checksumFlag, 1)
+  .set_parameter(:windowLog, 20)
+
+data = "Your data here"
+compressed = cctx.compress(data)
+decompressed = dctx.decompress(compressed)
+```
+
 ### Convenience Methods
 
 For one-off compression/decompression operations, you can use the module-level convenience methods:
@@ -92,11 +119,33 @@ samples = [
   "sample data 3"
 ]
 
-# Train with default size (112KB)
+# Train with default algorithm (fast, good for most use cases)
 dict_data = VibeZstd.train_dict(samples)
 
 # Or specify custom max dictionary size
 dict_data = VibeZstd.train_dict(samples, max_dict_size: 2048)
+
+# For better dictionaries, use COVER algorithm (k and d are required)
+# k: segment size (constraint: 0 < k, reasonable range: 16-2048+)
+# d: dmer size (constraint: 0 < d <= k, reasonable range: 6-16)
+dict_data = VibeZstd.train_dict_cover(
+  samples,
+  max_dict_size: 2048,
+  k: 200,  # Segment size
+  d: 6     # Dmer size
+)
+
+# For fastest training, use fast COVER algorithm
+# f: log of frequency array size (constraint: 0 < f <= 31, default: 20)
+# accel: acceleration level (constraint: 0 < accel <= 10, higher = faster but less accurate)
+dict_data = VibeZstd.train_dict_fast_cover(
+  samples,
+  max_dict_size: 2048,
+  k: 200,
+  d: 6,
+  f: 20,     # Frequency array size
+  accel: 1   # Acceleration (1 = default)
+)
 
 # Get dictionary ID
 dict_id = VibeZstd.get_dict_id(dict_data)
@@ -183,6 +232,203 @@ File.open('input.zst', 'rb') do |file|
 end
 ```
 
+### Prefix Dictionaries (Lightweight Alternative)
+
+For cases where you want dictionary-like compression without the overhead of training or pre-digesting a dictionary:
+
+```ruby
+cctx = VibeZstd::CCtx.new
+dctx = VibeZstd::DCtx.new
+
+# Use a shared prefix (must be the same for compression and decompression)
+prefix = "Common prefix data that appears in your data"
+
+cctx.use_prefix(prefix)
+dctx.use_prefix(prefix)
+
+compressed = cctx.compress("Common prefix data that we want to compress")
+decompressed = dctx.decompress(compressed)
+```
+
+### Memory Estimation
+
+Estimate memory usage before creating compression/decompression contexts:
+
+```ruby
+# Estimate memory for compression context at level 5
+cctx_bytes = VibeZstd::CCtx.estimate_memory(5)
+puts "CCtx will use approximately #{cctx_bytes} bytes"
+
+# Estimate memory for decompression context
+dctx_bytes = VibeZstd::DCtx.estimate_memory
+puts "DCtx will use approximately #{dctx_bytes} bytes"
+
+# Estimate memory for dictionaries
+dict_size = 112 * 1024  # 112KB dictionary
+cdict_bytes = VibeZstd::CDict.estimate_memory(dict_size, 5)
+ddict_bytes = VibeZstd::DDict.estimate_memory(dict_size)
+puts "CDict: #{cdict_bytes} bytes, DDict: #{ddict_bytes} bytes"
+```
+
+### Parameter Validation with Bounds
+
+Query valid parameter ranges for validation and better error messages:
+
+```ruby
+# Get bounds for a compression parameter
+bounds = VibeZstd::CCtx.parameter_bounds(:compressionLevel)
+puts "Compression level: #{bounds[:min]} to #{bounds[:max]}"
+# => Compression level: -131072 to 22
+
+# Validate before setting
+def set_safe_compression_level(cctx, level)
+  bounds = VibeZstd::CCtx.parameter_bounds(:compressionLevel)
+  if level < bounds[:min] || level > bounds[:max]
+    raise ArgumentError, "Level must be between #{bounds[:min]} and #{bounds[:max]}"
+  end
+  cctx.set_parameter(:compressionLevel, level)
+end
+
+# Check bounds for window size
+window_bounds = VibeZstd::CCtx.parameter_bounds(:windowLog)
+puts "Window log: #{window_bounds[:min]} to #{window_bounds[:max]}"
+# => Window log: 10 to 31
+
+# Query all parameter bounds for documentation
+[:compressionLevel, :windowLog, :nbWorkers].each do |param|
+  bounds = VibeZstd::CCtx.parameter_bounds(param)
+  puts "#{param}: #{bounds[:min]}..#{bounds[:max]}"
+end
+
+# Decompression parameter bounds
+dctx_bounds = VibeZstd::DCtx.parameter_bounds(:windowLogMax)
+puts "Max window log: #{dctx_bounds[:min]} to #{dctx_bounds[:max]}"
+```
+
+### Decompression Parameters
+
+Control decompression behavior to prevent memory exhaustion:
+
+```ruby
+dctx = VibeZstd::DCtx.new
+
+# Limit maximum window size during decompression (prevents memory attacks)
+dctx.set_parameter(:windowLogMax, 20)  # Max 1MB window
+
+compressed = File.read('data.zst')
+decompressed = dctx.decompress(compressed)
+```
+
+### Ultra-Fast Compression with Negative Levels
+
+For situations requiring maximum speed with acceptable compression loss:
+
+```ruby
+cctx = VibeZstd::CCtx.new
+dctx = VibeZstd::DCtx.new
+
+data = "Large data that needs ultra-fast compression"
+
+# Use negative level for fastest compression
+# Levels range from -131072 (fastest) to -1
+compressed = cctx.compress(data, -1)
+decompressed = dctx.decompress(compressed)
+```
+
+### Long Distance Matching (LDM) for Large Files
+
+For compressing large files with repeated patterns at long distances:
+
+```ruby
+cctx = VibeZstd::CCtx.new
+dctx = VibeZstd::DCtx.new
+
+# Enable LDM for better compression of large files
+cctx.set_parameter(:enableLongDistanceMatching, 1)
+
+# Optionally tune LDM parameters
+cctx.set_parameter(:ldmHashLog, 20)      # Hash table size (default: windowLog - 7)
+cctx.set_parameter(:ldmMinMatch, 64)     # Minimum match size (default: 64)
+cctx.set_parameter(:ldmBucketSizeLog, 3) # Bucket size for collision resolution
+cctx.set_parameter(:ldmHashRateLog, 6)   # Hash insertion frequency
+
+# Compress large file
+large_data = File.read('large_file.txt')
+compressed = cctx.compress(large_data, 9) # Use high compression level with LDM
+decompressed = dctx.decompress(compressed)
+```
+
+**When to use LDM:**
+- Large files (> 64KB) with repeated patterns
+- Log files with recurring messages
+- Database dumps
+- Source code repositories
+- Note: LDM increases memory usage and is auto-enabled at level 16+ with large windows
+
+### Low-Latency Streaming with Target Block Size
+
+For streaming applications that need to minimize latency (e.g., web browsers):
+
+```ruby
+require 'vibe_zstd'
+
+File.open('output.zst', 'wb') do |file|
+  writer = VibeZstd::Compress::Writer.new(file, level: 5)
+
+  # Set target compressed block size for better streaming behavior
+  # This helps browsers/clients process partial documents
+  writer.instance_variable_get(:@cstream).tap do |cstream|
+    cctx_ptr = cstream.instance_variable_get(:@cstream)
+    # Note: This is for illustration - you would set this via CCtx if available before streaming
+  end
+
+  # Or set on CCtx before compression
+  cctx = VibeZstd::CCtx.new
+  cctx.set_parameter(:targetCBlockSize, 2048) # Target ~2KB compressed blocks
+
+  data.each_slice(4096) do |chunk|
+    writer.write(chunk.join)
+  end
+
+  writer.finish
+end
+```
+
+### Multi-threading Tuning
+
+For optimal multi-threaded compression performance:
+
+```ruby
+cctx = VibeZstd::CCtx.new
+dctx = VibeZstd::DCtx.new
+
+# Enable multi-threaded compression
+cctx.set_parameter(:nbWorkers, 4) # Use 4 threads
+
+# Tune job size (default: auto-determined)
+# Larger jobs = better compression ratio but higher latency
+# Smaller jobs = lower latency but may reduce ratio
+cctx.set_parameter(:jobSize, 1048576) # 1MB per job
+
+# Tune overlap between jobs (0-9 scale)
+# Higher overlap = better ratio but slower
+# 0 = default (auto, usually 6-9 depending on strategy)
+# 1 = no overlap (fastest)
+# 9 = full window overlap (best ratio)
+cctx.set_parameter(:overlapLog, 6)
+
+# Compress large data with multi-threading
+large_data = File.read('large_dataset.txt')
+compressed = cctx.compress(large_data, 5)
+decompressed = dctx.decompress(compressed)
+```
+
+**Multi-threading tips:**
+- More workers ≠ always faster (diminishing returns after 4-8 threads)
+- Multi-threading adds overhead for small data (< 256KB)
+- Best for data > 1MB
+- jobSize and overlapLog only affect performance when nbWorkers >= 1
+
 ## API Reference
 
 ### VibeZstd::CCtx (Compression Context)
@@ -192,7 +438,57 @@ A reusable context for compressing data.
 #### Methods
 
 - `new()` - Creates a new compression context.
-- `compress(data, level = nil, dict = nil)` - Compresses the given data string. `level` defaults to Zstd's default compression level if not specified. `dict` is an optional CDict for dictionary-based compression.
+- `compress(data, level = nil, dict = nil, pledged_size: nil)` - Compresses the given data string.
+  - `level` defaults to Zstd's default compression level if not specified. Supports levels from -131072 to 22 (negative levels provide ultra-fast compression)
+  - `dict` is an optional CDict for dictionary-based compression
+  - `pledged_size` hints the decompressed size for improved compression ratio (optional)
+- `set_parameter(param, value)` - Sets advanced compression parameters. Returns self for method chaining. Available parameters:
+  - **Frame parameters:**
+    - `:checksumFlag` (0/1) - Enable 32-bit checksum for integrity verification
+    - `:contentSizeFlag` (0/1) - Include decompressed size in frame header
+    - `:dictIDFlag` (0/1) - Include dictionary ID in frame header
+  - **Core compression parameters:**
+    - `:compressionLevel` (1-22 or negative) - Compression level (negative for ultra-fast)
+    - `:windowLog` (10-31) - Window size as power of 2 (affects memory usage)
+    - `:hashLog` (6-26) - Hash table size as power of 2
+    - `:chainLog` (6-28) - Search chain length as power of 2
+    - `:searchLog` (1-26) - Number of search attempts as power of 2
+    - `:minMatch` (3-7) - Minimum match size
+    - `:targetLength` (0-128) - Target match length (strategy-dependent)
+    - `:strategy` (1-9) - Compression strategy (1=fast, 9=btultra2)
+    - `:targetCBlockSize` (0-131072+) - Target compressed block size for low-latency streaming
+  - **Long Distance Matching (LDM) parameters:**
+    - `:enableLongDistanceMatching` (0/1) - Enable LDM mode (critical for large files)
+    - `:ldmHashLog` (6-30) - LDM hash table size as power of 2
+    - `:ldmMinMatch` (4-4096) - LDM minimum match size (default: 64)
+    - `:ldmBucketSizeLog` (0-8) - LDM bucket size for collision resolution
+    - `:ldmHashRateLog` (0-28) - LDM hash insertion frequency
+  - **Multi-threading parameters:**
+    - `:nbWorkers` (0-200) - Number of threads for parallel compression (0 = single-threaded)
+    - `:jobSize` (0-1GB) - Compression job size (only when nbWorkers >= 1)
+    - `:overlapLog` (0-9) - Overlap size as fraction of window (only when nbWorkers >= 1)
+  - **Experimental parameters** (advanced use cases, may change between zstd versions):
+    - `:rsyncable` (0/1) - Generate rsync-friendly compressed data
+    - `:format` (0/1/2) - Frame format (0=zstd, 1=magicless, 2=skippable)
+    - `:forceMaxWindow` (0/1) - Force back-reference distance to remain < windowSize
+    - `:forceAttachDict` (0/1/2) - Force dictionary attachment mode (0=default, 1=attach, 2=copy)
+    - `:literalCompressionMode` (0/1/2) - Literal compression mode (0=auto, 1=enable, 2=disable)
+    - `:srcSizeHint` (0-INT_MAX) - Hint about source size for optimization
+    - `:enableDedicatedDictSearch` (0/1) - Enable dedicated dictionary search
+    - `:stableInBuffer` (0/1) - Input buffer will remain valid between calls
+    - `:stableOutBuffer` (0/1) - Output buffer will remain valid between calls
+    - `:blockDelimiters` (0/1) - Emit block boundary delimiters
+    - `:validateSequences` (0/1) - Validate generated sequences
+    - `:useRowMatchFinder` (0/1/2) - Use row-based match finder (0=auto, 1=disable, 2=enable)
+    - `:deterministicRefPrefix` (0/1) - Make reference prefix deterministic
+    - `:prefetchCDictTables` (0/1/2) - Prefetch dictionary tables (0=auto, 1=enable, 2=disable)
+    - `:enableSeqProducerFallback` (0/1) - Enable fallback for external sequence producer
+    - `:maxBlockSize` (0-131072+) - Maximum uncompressed block size
+    - `:searchForExternalRepcodes` (0/1/2) - Search for external repeat codes (0=auto, 1=enable, 2=disable)
+- `get_parameter(param)` - Gets current value of a compression parameter. Returns the integer value. Accepts the same parameter symbols as `set_parameter`
+- `use_prefix(prefix_data)` - Uses raw data as a compression prefix (lightweight dictionary alternative). The prefix must be set before each compression operation. Returns self for method chaining.
+- `CCtx.parameter_bounds(param)` - Class method that returns the valid range for a compression parameter. Returns a hash with `:min` and `:max` keys. Useful for parameter validation.
+- `CCtx.estimate_memory(level)` - Class method that estimates memory usage in bytes for a compression context at the given level. Useful for memory planning in constrained environments.
 
 ### VibeZstd::DCtx (Decompression Context)
 
@@ -202,7 +498,13 @@ A reusable context for decompressing data.
 
 - `new()` - Creates a new decompression context.
 - `decompress(data, dict = nil)` - Decompresses the given compressed data string. `dict` is an optional DDict for dictionary-based decompression.
+- `set_parameter(param, value)` - Sets advanced decompression parameters. Returns self for method chaining. Available parameters:
+  - `:windowLogMax` (10-31) - Maximum window size as power of 2. Prevents memory exhaustion attacks.
+- `get_parameter(param)` - Gets current value of a decompression parameter. Returns the integer value. Currently supports `:windowLogMax`.
+- `use_prefix(prefix_data)` - Uses raw data as a decompression prefix (must match the prefix used during compression). Returns self for method chaining.
+- `DCtx.parameter_bounds(param)` - Class method that returns the valid range for a decompression parameter. Returns a hash with `:min` and `:max` keys. Useful for parameter validation.
 - `DCtx.frame_content_size(data)` - Class method that returns the decompressed size of a compressed frame, or nil if unknown or invalid.
+- `DCtx.estimate_memory()` - Class method that estimates memory usage in bytes for a decompression context. Useful for memory planning in constrained environments.
 
 ### VibeZstd::CDict (Compression Dictionary)
 
@@ -213,6 +515,7 @@ A pre-digested dictionary for compression.
 - `new(dict_data, level = nil)` - Creates a compression dictionary from the given data. `level` defaults to Zstd's default if not specified.
 - `size()` - Returns the size of the dictionary in memory (in bytes).
 - `dict_id()` - Returns the dictionary ID. Returns 0 if the dictionary is raw content.
+- `CDict.estimate_memory(dict_size, level)` - Class method that estimates memory usage in bytes for a compression dictionary of the given size and compression level.
 
 ### VibeZstd::DDict (Decompression Dictionary)
 
@@ -223,6 +526,7 @@ A pre-digested dictionary for decompression.
 - `new(dict_data)` - Creates a decompression dictionary from the given data.
 - `size()` - Returns the size of the dictionary in memory (in bytes).
 - `dict_id()` - Returns the dictionary ID. Returns 0 if the dictionary is raw content.
+- `DDict.estimate_memory(dict_size)` - Class method that estimates memory usage in bytes for a decompression dictionary of the given size.
 
 ### VibeZstd::Compress::Writer (Streaming Compression)
 
@@ -230,7 +534,10 @@ A streaming writer for compressing data incrementally.
 
 #### Methods
 
-- `new(io, level: 3, dict: nil)` - Creates a new compression writer that writes to the given IO object. `level` specifies the compression level (1-22). `dict` is an optional CDict for dictionary-based compression.
+- `new(io, level: 3, dict: nil, pledged_size: nil)` - Creates a new compression writer that writes to the given IO object.
+  - `level` specifies the compression level (1-22)
+  - `dict` is an optional CDict for dictionary-based compression
+  - `pledged_size` hints the total size to be compressed for improved compression ratio (optional)
 - `write(data)` - Compresses and writes the given data. Returns self for method chaining.
 - `flush()` - Flushes any buffered compressed data to the IO. Returns self for method chaining.
 - `finish()` / `close()` - Finalizes the compression and writes the end frame. Must be called to produce valid compressed data. Returns self.
@@ -251,8 +558,12 @@ A streaming reader for decompressing data incrementally.
 - `compress(data, level: nil, dict: nil)` - Convenience method for one-off compression. Returns compressed data.
 - `decompress(data, dict: nil)` - Convenience method for one-off decompression. Returns decompressed data.
 - `frame_content_size(data)` - Returns the decompressed size of a compressed frame, or nil if unknown or invalid. Useful for pre-allocating buffers.
-- `train_dict(samples, max_dict_size: 112640)` - Trains a dictionary from an array of sample strings. Returns the trained dictionary data as a string. The `max_dict_size` parameter specifies the maximum dictionary size in bytes (default is 112KB).
+- `compress_bound(size)` - Returns the maximum compressed size for data of given uncompressed size. Useful for buffer pre-allocation.
+- `train_dict(samples, max_dict_size: 112640)` - Trains a dictionary from an array of sample strings using the default algorithm. Returns the trained dictionary data as a string. The `max_dict_size` parameter specifies the maximum dictionary size in bytes (default is 112KB).
+- `train_dict_cover(samples, max_dict_size: 112640, k:, d:, steps: 0, split_point: 1.0, shrink_dict: false, shrink_dict_max_regression: 0, nb_threads: 0)` - Trains a dictionary using the COVER algorithm for better compression. Parameters `k` (segment size) and `d` (dmer size) are required. Returns the trained dictionary data.
+- `train_dict_fast_cover(samples, max_dict_size: 112640, k:, d:, f: 0, steps: 0, split_point: 0.75, accel: 0, shrink_dict: false, shrink_dict_max_regression: 0, nb_threads: 0)` - Trains a dictionary using the fast COVER algorithm for faster training with good quality. Parameters `k` and `d` are required. Optional `f` (log of frequency array size) and `accel` (acceleration level 1-10) control speed vs quality tradeoff.
 - `get_dict_id(dict_data)` - Returns the dictionary ID from raw dictionary data. Returns 0 for raw content dictionaries, non-zero for trained dictionaries.
+- `get_dict_id_from_frame(data)` - Returns the dictionary ID from a compressed frame. Returns 0 if no dictionary was used. Useful for determining which dictionary to use for decompression.
 
 ## Thread Safety and Ractors
 
