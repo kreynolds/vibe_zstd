@@ -2,6 +2,9 @@
 
 require "mkmf"
 
+# Check for Zstandard library
+abort "zstd library is missing. Please install libzstd." if !pkg_config("libzstd") && !have_library("zstd")
+
 # Makes all symbols private by default to avoid unintended conflict
 # with other gems. To explicitly export symbols you can use RUBY_FUNC_EXPORTED
 # selectively, or entirely remove this flag.

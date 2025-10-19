@@ -1,4 +1,54 @@
 module VibeZstd
   VERSION: String
-  # See the writing guide of rbs: https://github.com/ruby/rbs#guides
+
+  # Compression context for reusable compression operations
+  class CCtx
+    def initialize: () -> void
+    def compress: (String data, ?Integer? level, ?CDict? dict) -> String
+  end
+
+  # Decompression context for reusable decompression operations
+  class DCtx
+    def initialize: () -> void
+    def decompress: (String data, ?DDict? dict) -> String
+    def self.frame_content_size: (String data) -> Integer?
+  end
+
+  # Pre-digested compression dictionary
+  class CDict
+    def initialize: (String dict_data, ?Integer? level) -> void
+    def size: () -> Integer
+    def dict_id: () -> Integer
+  end
+
+  # Pre-digested decompression dictionary
+  class DDict
+    def initialize: (String dict_data) -> void
+    def size: () -> Integer
+    def dict_id: () -> Integer
+  end
+
+  module Compress
+    # Streaming compression writer
+    class Writer
+      def initialize: (IO io, ?level: Integer?, ?dict: CDict?) -> void
+      def write: (String data) -> self
+      def flush: () -> self
+      def finish: () -> self
+      def close: () -> self
+    end
+  end
+
+  module Decompress
+    # Streaming decompression reader
+    class Reader
+      def initialize: (IO io, ?dict: DDict?) -> void
+      def read: (?Integer? size) -> String?
+    end
+  end
+
+  # Module-level convenience methods
+  def self.compress: (String data, ?level: Integer?, ?dict: CDict?) -> String
+  def self.decompress: (String data, ?dict: DDict?) -> String
+  def self.frame_content_size: (String data) -> Integer?
 end
