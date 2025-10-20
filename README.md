@@ -211,16 +211,51 @@ end
 ```ruby
 require 'vibe_zstd'
 
-# Decompress from a file
+# Decompress from a file - chunked streaming (memory-safe for large files)
 File.open('input.zst', 'rb') do |file|
   reader = VibeZstd::Decompress::Reader.new(file)
 
-  # Read all at once
-  decompressed = reader.read
-
-  # Or read in chunks
-  while chunk = reader.read(1024)
+  # Read in chunks (~128KB each) - recommended for large files
+  while chunk = reader.read
     process(chunk)
+  end
+end
+
+# Configure initial chunk size for unbounded reads
+# Good for optimizing memory usage based on your workload
+File.open('input.zst', 'rb') do |file|
+  # Use 1MB chunks for large data streams
+  reader = VibeZstd::Decompress::Reader.new(file, initial_chunk_size: 1_048_576)
+
+  # Unbounded reads will now return up to 1MB per call
+  while chunk = reader.read
+    process(chunk)
+  end
+end
+
+# Or specify custom chunk size per read
+File.open('input.zst', 'rb') do |file|
+  reader = VibeZstd::Decompress::Reader.new(file)
+
+  # Read in 64KB chunks (overrides initial_chunk_size if set)
+  while chunk = reader.read(64 * 1024)
+    process(chunk)
+  end
+end
+
+# Stream from HTTP to disk (true streaming - constant memory usage)
+require 'net/http'
+uri = URI('https://example.com/large_file.zst')
+File.open('output.txt', 'wb') do |output|
+  Net::HTTP.start(uri.host, uri.port, use_ssl: true) do |http|
+    http.request_get(uri.path) do |response|
+      reader = VibeZstd::Decompress::Reader.new(response.body)
+
+      # Streams in chunks - only ~128KB in memory at a time
+      while chunk = reader.read
+        output.write(chunk)
+      end
+    end
   end
 end
 
@@ -228,9 +263,66 @@ end
 File.open('input.zst', 'rb') do |file|
   ddict = VibeZstd::DDict.new(dict_data)
   reader = VibeZstd::Decompress::Reader.new(file, dict: ddict)
-  decompressed = reader.read
+
+  while chunk = reader.read
+    process(chunk)
+  end
 end
 ```
+
+#### Configuring Chunk Sizes
+
+The `Reader#read` method uses chunked streaming for memory safety. You can configure the chunk size in two ways:
+
+```ruby
+# Method 1: Set initial_chunk_size when creating the reader
+# This affects ALL unbounded reads on this reader
+reader = VibeZstd::Decompress::Reader.new(io, initial_chunk_size: 1_048_576)  # 1MB chunks
+chunk = reader.read()  # Returns up to 1MB
+
+# Method 2: Specify size per read call
+# This overrides initial_chunk_size for that specific call
+reader = VibeZstd::Decompress::Reader.new(io)
+chunk = reader.read(64 * 1024)  # Returns up to 64KB
+
+# Default behavior (no configuration)
+reader = VibeZstd::Decompress::Reader.new(io)
+chunk = reader.read()  # Returns up to ~128KB (ZSTD_DStreamOutSize)
+```
+
+**Configuration options:**
+
+```ruby
+# Small chunks (4KB) - memory-constrained environments
+reader = VibeZstd::Decompress::Reader.new(io, initial_chunk_size: 4096)
+while chunk = reader.read
+  process(chunk)  # Each chunk ≤ 4KB
+end
+
+# Default chunks (~128KB) - good for most use cases
+reader = VibeZstd::Decompress::Reader.new(io)
+while chunk = reader.read
+  process(chunk)  # Each chunk ≤ 128KB
+end
+
+# Large chunks (10MB) - high-throughput scenarios
+reader = VibeZstd::Decompress::Reader.new(io, initial_chunk_size: 10_485_760)
+while chunk = reader.read
+  process(chunk)  # Each chunk ≤ 10MB
+end
+
+# Per-read override (overrides initial_chunk_size)
+reader = VibeZstd::Decompress::Reader.new(io, initial_chunk_size: 1_048_576)
+chunk = reader.read(8192)  # Returns up to 8KB, ignoring 1MB setting
+```
+
+**Best practices:**
+- **Small frames (< 10KB)**: Set `initial_chunk_size: 4096` to avoid over-allocation
+- **Medium files (10KB - 1MB)**: Use default (~128KB) for balanced performance
+- **Large files/streams (> 1MB)**: Set `initial_chunk_size: 1_048_576` (1MB) or higher to reduce read() calls
+- **Memory-constrained**: Use smaller chunks (4KB-8KB) to minimize memory footprint
+- **High throughput**: Use larger chunks (1MB-10MB) to reduce loop overhead
+- **Mixed workloads**: Configure per-reader based on expected data size
 
 ### Prefix Dictionaries (Lightweight Alternative)
 
@@ -318,6 +410,40 @@ dctx.set_parameter(:windowLogMax, 20)  # Max 1MB window
 compressed = File.read('data.zst')
 decompressed = dctx.decompress(compressed)
 ```
+
+### Optimizing Decompression for Unknown-Size Frames
+
+When decompressing frames without a known content size (e.g., streaming compression with `content_size: false`), VibeZstd uses an exponential growth buffer strategy. You can configure the initial buffer capacity to optimize for your data size:
+
+```ruby
+# Configure globally for all new DCtx instances
+VibeZstd::DCtx.default_initial_capacity = 1_048_576  # 1MB for large data
+VibeZstd::DCtx.default_initial_capacity = 4_096      # 4KB for tiny data
+
+# Configure per-instance
+dctx = VibeZstd::DCtx.new(initial_capacity: 512_000)  # 512KB
+
+# Or configure per-call (overrides instance setting)
+dctx.decompress(compressed_data, initial_capacity: 16_384)  # 16KB
+
+# Reset to default (ZSTD_DStreamOutSize, ~128KB)
+VibeZstd::DCtx.default_initial_capacity = nil
+dctx.initial_capacity = nil
+```
+
+**Configuration levels (priority order):**
+1. **Per-call**: `decompress(data, initial_capacity: N)` - highest priority
+2. **Instance**: `DCtx.new(initial_capacity: N)` or `dctx.initial_capacity = N`
+3. **Global**: `DCtx.default_initial_capacity = N`
+4. **Default**: `ZSTD_DStreamOutSize()` (~128KB) - if nothing configured
+
+**When to configure:**
+- **Small data (< 10KB)**: Set to `4096` or `8192` to avoid over-allocation
+- **Large data (> 1MB)**: Set to `1_048_576` or higher to reduce reallocations
+- **Mixed workloads**: Use per-call overrides for edge cases
+- **Known-size frames**: Not applicable - size is known from frame header
+
+**Note:** This only affects frames with unknown content size. Frames with known sizes (the common case) allocate exactly what's needed regardless of this setting.
 
 ### Ultra-Fast Compression with Negative Levels
 
@@ -496,12 +622,19 @@ A reusable context for decompressing data.
 
 #### Methods
 
-- `new()` - Creates a new decompression context.
-- `decompress(data, dict = nil)` - Decompresses the given compressed data string. `dict` is an optional DDict for dictionary-based decompression.
+- `new(initial_capacity: nil)` - Creates a new decompression context.
+  - `initial_capacity` - Optional initial buffer capacity (in bytes) for unknown-size frames. If nil, uses the class default.
+- `decompress(data, dict: nil, initial_capacity: nil)` - Decompresses the given compressed data string.
+  - `dict` - Optional DDict for dictionary-based decompression.
+  - `initial_capacity` - Optional per-call override for initial buffer capacity (in bytes) for unknown-size frames.
 - `set_parameter(param, value)` - Sets advanced decompression parameters. Returns self for method chaining. Available parameters:
   - `:windowLogMax` (10-31) - Maximum window size as power of 2. Prevents memory exhaustion attacks.
 - `get_parameter(param)` - Gets current value of a decompression parameter. Returns the integer value. Currently supports `:windowLogMax`.
+- `initial_capacity` - Gets the instance's initial capacity setting for unknown-size frames. Returns the configured value, or the class default if not set.
+- `initial_capacity=(value)` - Sets the instance's initial capacity for unknown-size frames. Set to nil to use the class default. Value must be positive.
 - `use_prefix(prefix_data)` - Uses raw data as a decompression prefix (must match the prefix used during compression). Returns self for method chaining.
+- `DCtx.default_initial_capacity` - Class method that gets the global default initial capacity for all new DCtx instances. Returns `ZSTD_DStreamOutSize()` (~128KB) if not configured.
+- `DCtx.default_initial_capacity=(value)` - Class method that sets the global default initial capacity for all new DCtx instances. Set to nil to reset to ZSTD default. Value must be positive.
 - `DCtx.parameter_bounds(param)` - Class method that returns the valid range for a decompression parameter. Returns a hash with `:min` and `:max` keys. Useful for parameter validation.
 - `DCtx.frame_content_size(data)` - Class method that returns the decompressed size of a compressed frame, or nil if unknown or invalid.
 - `DCtx.estimate_memory()` - Class method that estimates memory usage in bytes for a decompression context. Useful for memory planning in constrained environments.
@@ -544,12 +677,19 @@ A streaming writer for compressing data incrementally.
 
 ### VibeZstd::Decompress::Reader (Streaming Decompression)
 
-A streaming reader for decompressing data incrementally.
+A streaming reader for decompressing data incrementally with chunked reading for memory safety.
 
 #### Methods
 
-- `new(io, dict: nil)` - Creates a new decompression reader that reads from the given IO object. `dict` is an optional DDict for dictionary-based decompression.
-- `read(size = nil)` - Reads and decompresses data. If `size` is nil, reads until end of stream. If `size` is specified, reads up to that many bytes of decompressed data. Returns nil at end of stream.
+- `new(io, dict: nil, initial_chunk_size: nil)` - Creates a new decompression reader that reads from the given IO object.
+  - `dict` - Optional DDict for dictionary-based decompression.
+  - `initial_chunk_size` - Optional size (in bytes) for unbounded reads. If nil, defaults to `ZSTD_DStreamOutSize()` (~128KB). Must be greater than 0 if specified. This setting affects all unbounded `read()` calls on this reader instance.
+- `read(size = nil)` - Reads and decompresses data in chunks.
+  - If `size` is nil, reads up to `initial_chunk_size` bytes (or ~128KB if not configured) of decompressed data per call.
+  - If `size` is specified, reads up to that many bytes of decompressed data (overrides `initial_chunk_size` for this call).
+  - Returns nil at end of stream.
+  - **Note:** This method uses true chunked streaming - it does NOT buffer entire frames in memory, making it safe for decompressing multi-GB files with constant memory usage.
+- `eof?` - Returns true if the end of stream has been reached.
 
 ### VibeZstd Module Methods
 
@@ -575,11 +715,83 @@ VibeZstd is designed to be thread-safe and compatible with Ruby's Ractors:
 
 ## Performance
 
-VibeZstd leverages the high-performance Zstandard library:
+VibeZstd leverages the high-performance Zstandard library for excellent compression performance:
 
-- Compression ratios comparable to or better than gzip/bzip2 at similar speeds.
-- Extremely fast decompression.
-- Supports compression levels from 1 (fastest) to 22 (best compression).
+- Compression ratios comparable to or better than gzip/bzip2 at similar speeds
+- Extremely fast decompression
+- Supports compression levels from -131072 (ultra-fast) to 22 (maximum compression)
+
+### Benchmark Results
+
+Results from Ruby 3.3.7 on arm64-darwin24, Zstd 1.5.7. Run `ruby benchmark/for_readme.rb` to generate results for your platform.
+
+#### Context Reuse Performance
+
+Reusing compression/decompression contexts vs creating new ones (5000 iterations each):
+
+| Data Size | New Context | Reused Context | Speedup |
+|-----------|-------------|----------------|---------|
+| 1KB | 70,095 ops/s | 159,245 ops/s | 2.27x |
+| 10KB | 38,839 ops/s | 62,467 ops/s | 1.61x |
+| 100KB | 7,732 ops/s | 9,346 ops/s | 1.21x |
+
+**Memory savings:** Reusing contexts saves ~6.7GB for 5000 operations (99.98% reduction)
+
+**Recommendation:** Always reuse CCtx/DCtx instances for multiple operations.
+
+#### Dictionary Compression
+
+Compression with vs without trained dictionaries (JSON data):
+
+| Method | Compressed Size | Ratio | Improvement |
+|--------|----------------|-------|-------------|
+| Without dictionary | 110B | 1.15x | - |
+| With dictionary (16KB) | 54B | 2.33x | 50.9% smaller |
+
+Original size: 126 bytes. Dictionaries are highly effective for small, similar data like JSON, logs, and API responses.
+
+#### Compression Levels
+
+Speed vs compression ratio trade-offs:
+
+| Level | Ratio | Speed (ops/sec) | Memory | Use Case |
+|-------|-------|-----------------|--------|----------|
+| -1 | 5.99x | 11,086 | 537KB | Ultra-fast, real-time |
+| 1 | 8.19x | 10,775 | 569KB | Fast, high-throughput |
+| 3 | 7.92x | 8,896 | 1.24MB | Balanced (default) |
+| 9 | 9.1x | 969 | 12.49MB | Better compression |
+| 19 | 10.22x | 34 | 81.25MB | Maximum compression |
+
+#### Multi-threading Performance
+
+Compression speedup with multiple workers (500KB data):
+
+| Workers | Throughput | Speedup | Efficiency |
+|---------|------------|---------|------------|
+| 0 (single) | 732MB/s | 1.0x | 100% |
+| 2 | 734MB/s | 1.0x | 50% |
+| 4 | 689MB/s | 0.94x | 24% |
+
+**Note:** Multi-threading is most effective for larger data (> 1MB). Overhead may outweigh benefits for smaller payloads.
+
+### Running Benchmarks
+
+Comprehensive benchmarks are available in the `benchmark/` directory:
+
+```bash
+# Run all benchmarks
+ruby benchmark/run_all.rb
+
+# Run specific benchmarks
+ruby benchmark/context_reuse.rb
+ruby benchmark/dictionary_usage.rb
+ruby benchmark/compression_levels.rb
+ruby benchmark/streaming.rb
+ruby benchmark/multithreading.rb
+ruby benchmark/dictionary_training.rb
+```
+
+See `benchmark/README.md` for detailed benchmark documentation.
 
 ## Development
 

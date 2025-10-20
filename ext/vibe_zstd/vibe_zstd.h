@@ -12,6 +12,7 @@ typedef struct {
 
 typedef struct {
     ZSTD_DCtx* dctx;
+    size_t initial_capacity;  // Initial capacity for unknown-size decompression (0 = use class default)
 } vibe_zstd_dctx;
 
 typedef struct {
@@ -33,6 +34,7 @@ typedef struct {
     ZSTD_inBuffer input;  // Zstandard manages the buffer state
     VALUE input_data;      // Ruby string holding input data
     int eof;               // Flag to track if we've reached end of stream
+    size_t initial_chunk_size;  // Initial chunk size for unbounded reads (0 = use default)
 } vibe_zstd_dstream;
 
 // TypedData types
