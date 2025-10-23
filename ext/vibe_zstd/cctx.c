@@ -169,7 +169,7 @@ static cctx_param_entry cctx_param_table[] = {
     {0, ZSTD_c_contentSizeFlag, "content_size_flag"},
     {0, ZSTD_c_checksumFlag, "checksum_flag"},
     {0, ZSTD_c_dictIDFlag, "dict_id_flag"},
-    {0, ZSTD_c_nbWorkers, "nb_workers"},
+    {0, ZSTD_c_nbWorkers, "workers"},
     {0, ZSTD_c_jobSize, "job_size"},
     {0, ZSTD_c_overlapLog, "overlap_log"},
     {0, ZSTD_c_rsyncable, "rsyncable"},
@@ -352,7 +352,7 @@ DEFINE_CCTX_PARAM_ACCESSORS(ldm_hash_rate_log, ZSTD_c_ldmHashRateLog, "ldm_hash_
 DEFINE_CCTX_PARAM_BOOL_ACCESSORS(content_size_flag, ZSTD_c_contentSizeFlag, "content_size_flag")
 DEFINE_CCTX_PARAM_BOOL_ACCESSORS(checksum_flag, ZSTD_c_checksumFlag, "checksum_flag")
 DEFINE_CCTX_PARAM_BOOL_ACCESSORS(dict_id_flag, ZSTD_c_dictIDFlag, "dict_id_flag")
-DEFINE_CCTX_PARAM_ACCESSORS(nb_workers, ZSTD_c_nbWorkers, "nb_workers")
+DEFINE_CCTX_PARAM_ACCESSORS(workers, ZSTD_c_nbWorkers, "workers")
 DEFINE_CCTX_PARAM_ACCESSORS(job_size, ZSTD_c_jobSize, "job_size")
 DEFINE_CCTX_PARAM_ACCESSORS(overlap_log, ZSTD_c_overlapLog, "overlap_log")
 DEFINE_CCTX_PARAM_BOOL_ACCESSORS(rsyncable, ZSTD_c_rsyncable, "rsyncable")
@@ -513,10 +513,8 @@ vibe_zstd_cctx_init_class(VALUE rb_cVibeZstdCCtx) {
     rb_define_alias(rb_cVibeZstdCCtx, "dict_id=", "dict_id_flag=");
     rb_define_alias(rb_cVibeZstdCCtx, "dict_id", "dict_id_flag");
     rb_define_alias(rb_cVibeZstdCCtx, "dict_id?", "dict_id_flag");
-    rb_define_method(rb_cVibeZstdCCtx, "nb_workers=", vibe_zstd_cctx_set_nb_workers, 1);
-    rb_define_method(rb_cVibeZstdCCtx, "nb_workers", vibe_zstd_cctx_get_nb_workers, 0);
-    rb_define_alias(rb_cVibeZstdCCtx, "workers=", "nb_workers=");
-    rb_define_alias(rb_cVibeZstdCCtx, "workers", "nb_workers");
+    rb_define_method(rb_cVibeZstdCCtx, "workers=", vibe_zstd_cctx_set_workers, 1);
+    rb_define_method(rb_cVibeZstdCCtx, "workers", vibe_zstd_cctx_get_workers, 0);
     rb_define_method(rb_cVibeZstdCCtx, "job_size=", vibe_zstd_cctx_set_job_size, 1);
     rb_define_method(rb_cVibeZstdCCtx, "job_size", vibe_zstd_cctx_get_job_size, 0);
     rb_define_method(rb_cVibeZstdCCtx, "overlap_log=", vibe_zstd_cctx_set_overlap_log, 1);

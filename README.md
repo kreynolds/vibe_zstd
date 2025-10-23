@@ -28,17 +28,6 @@ end
 
 ## Installation
 
-### Prerequisites
-
-This gem requires the Zstandard library to be installed on your system:
-
-- **macOS**: `brew install zstd`
-- **Ubuntu/Debian**: `sudo apt-get install libzstd-dev`
-- **CentOS/RHEL**: `sudo yum install libzstd-devel`
-- **Windows**: Install via vcpkg or similar
-
-### Gem Installation
-
 Add to your Gemfile:
 
 ```ruby
@@ -355,6 +344,43 @@ end
 - **Large data (> 1MB)**: `initial_chunk_size: 1_048_576` to reduce overhead
 - **Memory-constrained**: Use smaller chunks (4-8KB)
 - **High throughput**: Use larger chunks (1-10MB)
+
+#### Line-by-Line Processing
+
+`DecompressReader` provides IO-like methods for processing compressed text files line by line:
+
+```ruby
+# Process compressed log file line by line
+File.open('app.log.zst', 'rb') do |file|
+  reader = VibeZstd::DecompressReader.new(file)
+
+  # Read lines one at a time
+  while line = reader.gets
+    # Process each log entry
+    if line.include?('ERROR')
+      alert_on_call(line)
+    end
+  end
+end
+
+# Or use each_line for cleaner iteration
+VibeZstd::DecompressReader.open(file) do |reader|
+  reader.each_line do |line|
+    process_log_entry(line)
+  end
+end
+
+# Read specific number of bytes
+reader.readpartial(4096)  # Raises EOFError at end of stream
+
+# Check for end of stream
+reader.eof?  # => true/false
+```
+
+**Use cases:**
+- **Log processing** - Parse compressed log files without decompressing the entire file
+- **CSV/TSV parsing** - Read compressed data files line by line for memory-efficient ETL
+- **Configuration files** - Load compressed config files with minimal memory footprint
 
 ### Multi-threaded Compression
 
@@ -862,7 +888,21 @@ VibeZstd::DecompressReader.open(io, **opts) { |r| ... }
 reader.read(size = nil)
 reader.eof?
 reader.each { |chunk| ... }
+reader.each_line(separator = $/) { |line| ... }
+reader.gets(separator = $/)
+reader.readline(separator = $/)
+reader.readpartial(maxlen)
 reader.read_all
+```
+
+### ThreadLocal (Context Pooling)
+
+```ruby
+# Thread-local context reuse (ideal for Rails/Puma applications)
+VibeZstd::ThreadLocal.compress(data, level: nil, dict: nil, pledged_size: nil)
+VibeZstd::ThreadLocal.decompress(data, dict: nil, initial_capacity: nil)
+VibeZstd::ThreadLocal.clear_thread_cache!
+VibeZstd::ThreadLocal.thread_cache_stats
 ```
 
 ## Thread Safety and Ractors
@@ -906,7 +946,7 @@ See `benchmark/README.md` for detailed documentation.
 
 ## Development
 
-After checking out the repo:
+To set up the development environment:
 
 ```bash
 bin/setup              # Install dependencies
@@ -920,10 +960,19 @@ bundle exec rake install  # Install locally
 
 Bug reports and pull requests are welcome on GitHub at https://github.com/kreynolds/vibe_zstd.
 
+## Vendored Libraries
+
+This gem vendors the Zstandard (zstd) compression library to provide consistent behavior across all platforms. The vendored zstd library is located in `ext/vibe_zstd/libzstd/` and is licensed under the BSD License.
+
+**Zstandard License:**
+- Copyright (c) Meta Platforms, Inc. and affiliates
+- Licensed under the BSD License (see `ext/vibe_zstd/libzstd/LICENSE`)
+- Project: https://github.com/facebook/zstd
+
+For the complete zstd license text, see the LICENSE file in the vendored library directory.
+
 ## License
 
-Available as open source under the [MIT License](https://opensource.org/licenses/MIT).
+The VibeZstd gem itself is available as open source under the [MIT License](https://opensource.org/licenses/MIT).
 
-## Code of Conduct
-
-Everyone interacting in the VibeZstd project is expected to follow the [code of conduct](https://github.com/kreynolds/vibe_zstd/blob/main/CODE_OF_CONDUCT.md).
+This gem vendors the Zstandard library, which is separately licensed under the BSD License. See the [Vendored Libraries](#vendored-libraries) section above for details.

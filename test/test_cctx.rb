@@ -247,7 +247,7 @@ class TestCCtx < Minitest::Test
       :enable_long_distance_matching, :ldm_hash_log, :ldm_min_match,
       :ldm_bucket_size_log, :ldm_hash_rate_log,
       :content_size_flag, :checksum_flag, :dict_id_flag,
-      :nb_workers, :job_size, :overlap_log
+      :workers, :job_size, :overlap_log
     ]
 
     parameters.each do |param|
@@ -549,8 +549,8 @@ class TestCCtx < Minitest::Test
     cctx = VibeZstd::CCtx.new
     dctx = VibeZstd::DCtx.new
 
-    # Set nbWorkers first (required for jobSize to have effect)
-    cctx.nb_workers = 2
+    # Set workers first (required for jobSize to have effect)
+    cctx.workers = 2
 
     # Set jobSize and verify
     cctx.job_size = 1048576 # 1MB
@@ -567,8 +567,8 @@ class TestCCtx < Minitest::Test
     cctx = VibeZstd::CCtx.new
     dctx = VibeZstd::DCtx.new
 
-    # Set nbWorkers first (required for overlapLog to have effect)
-    cctx.nb_workers = 2
+    # Set workers first (required for overlapLog to have effect)
+    cctx.workers = 2
 
     # Set overlapLog and verify
     cctx.overlap_log = 5
@@ -885,17 +885,16 @@ class TestCCtx < Minitest::Test
     assert_equal(data, decompressed)
   end
 
-  def test_workers_alias
+  def test_workers_parameter
     cctx = VibeZstd::CCtx.new
     dctx = VibeZstd::DCtx.new
 
-    # Test natural English alias
+    # Test workers parameter
     cctx.workers = 4
     assert_equal(4, cctx.workers)
-    assert_equal(4, cctx.nb_workers)
 
-    # Test compression works with alias
-    data = "Test data for workers alias " * 100
+    # Test compression works with workers
+    data = "Test data for workers parameter " * 100
     compressed = cctx.compress(data)
     decompressed = dctx.decompress(compressed)
     assert_equal(data, decompressed)
