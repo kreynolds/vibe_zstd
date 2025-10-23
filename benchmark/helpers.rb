@@ -85,9 +85,9 @@ module BenchmarkHelpers
   # Formatting helpers for nice output
   module Formatter
     def self.header(title)
-      puts "\n#{'=' * 80}"
+      puts "\n#{"=" * 80}"
       puts title.center(80)
-      puts "#{'=' * 80}\n\n"
+      puts "#{"=" * 80}\n\n"
     end
 
     def self.section(title)
@@ -111,10 +111,10 @@ module BenchmarkHelpers
 
         # Print markdown version (always, for README)
         puts "Markdown table (for README):" if defined?(Terminal::Table)
-        puts "| #{headers.join(' | ')} |"
-        puts "| #{headers.map { '---' }.join(' | ')} |"
+        puts "| #{headers.join(" | ")} |"
+        puts "| #{headers.map { "---" }.join(" | ")} |"
         rows.each do |row|
-          puts "| #{row.join(' | ')} |"
+          puts "| #{row.join(" | ")} |"
         end
       end
       puts
@@ -127,10 +127,10 @@ module BenchmarkHelpers
         headers = data.first.keys
         rows = data.map(&:values)
 
-        puts "| #{headers.join(' | ')} |"
-        puts "| #{headers.map { '---' }.join(' | ')} |"
+        puts "| #{headers.join(" | ")} |"
+        puts "| #{headers.map { "---" }.join(" | ")} |"
         rows.each do |row|
-          puts "| #{row.join(' | ')} |"
+          puts "| #{row.join(" | ")} |"
         end
       end
       puts
@@ -175,10 +175,10 @@ module BenchmarkHelpers
 
     def self.current_memory_usage
       # Try to get actual memory usage (platform-specific)
-      if RUBY_PLATFORM =~ /darwin/
+      if RUBY_PLATFORM.match?(/darwin/)
         # macOS
         `ps -o rss= -p #{Process.pid}`.to_i * 1024
-      elsif RUBY_PLATFORM =~ /linux/
+      elsif RUBY_PLATFORM.match?(/linux/)
         # Linux
         File.read("/proc/#{Process.pid}/statm").split[1].to_i * 4096
       else
@@ -201,7 +201,7 @@ module BenchmarkHelpers
     end
 
     def to_h
-      h = { "Method" => name }
+      h = {"Method" => name}
       h["Speed"] = "#{Formatter.format_number(iterations_per_sec.to_i)} ops/sec" if iterations_per_sec
       h["Memory"] = Formatter.format_bytes(memory_bytes) if memory_bytes
       h["Ratio"] = Formatter.format_ratio(compression_ratio) if compression_ratio

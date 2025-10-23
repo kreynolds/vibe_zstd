@@ -54,8 +54,8 @@ test_data = {
   name: "Test User",
   email: "test@example.com",
   status: "active",
-  preferences: { theme: "dark", notifications: true, language: "en" },
-  metadata: { login_count: 42, last_ip: "192.168.1.1" }
+  preferences: {theme: "dark", notifications: true, language: "en"},
+  metadata: {login_count: 42, last_ip: "192.168.1.1"}
 }.to_json
 
 # Compress without dictionary

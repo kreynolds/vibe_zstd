@@ -15,6 +15,7 @@ extern rb_data_type_t vibe_zstd_cstream_type;
 extern rb_data_type_t vibe_zstd_dstream_type;
 
 // CompressWriter implementation
+// Wraps ZSTD streaming compression to write compressed data to an IO object
 static VALUE
 vibe_zstd_writer_initialize(int argc, VALUE *argv, VALUE self) {
     VALUE io, options;
@@ -205,6 +206,7 @@ vibe_zstd_writer_finish(VALUE self) {
 }
 
 // DecompressReader implementation
+// Wraps ZSTD streaming decompression to read from a compressed IO object
 static VALUE
 vibe_zstd_reader_initialize(int argc, VALUE *argv, VALUE self) {
     VALUE io, options;
@@ -271,6 +273,23 @@ vibe_zstd_reader_initialize(int argc, VALUE *argv, VALUE self) {
     return self;
 }
 
+// DecompressReader read - Read decompressed data from stream
+//
+// Handles streaming decompression with buffered input management:
+// - Requested size: Reads up to specified number of bytes
+// - No size (nil): Reads one chunk (default: ZSTD_DStreamOutSize ~128KB)
+//
+// Buffer management:
+// - Maintains internal compressed input buffer that refills from IO as needed
+// - Calls ZSTD_decompressStream incrementally to produce output
+// - Tracks EOF state based on IO exhaustion and frame completion
+//
+// EOF handling:
+// - Returns nil when no more data available
+// - Sets eof flag when: IO returns nil, frame complete (ret==0), or no progress made
+//
+// This implements proper streaming semantics for incremental decompression
+// of arbitrarily large files without loading everything into memory.
 static VALUE
 vibe_zstd_reader_read(int argc, VALUE *argv, VALUE self) {
     VALUE size_arg;

@@ -41,7 +41,10 @@ vibe_zstd_cctx_estimate_memory(VALUE self, VALUE level) {
     return SIZET2NUM(estimate);
 }
 
-// Compress args for GVL
+// Compress args for GVL release
+// This structure packages all arguments needed for compression so we can
+// call ZSTD functions without holding Ruby's Global VM Lock (GVL).
+// Releasing the GVL allows other Ruby threads to run during CPU-intensive compression.
 typedef struct {
     ZSTD_CCtx* cctx;
     ZSTD_CDict* cdict;
@@ -53,6 +56,9 @@ typedef struct {
     size_t result;
 } compress_args;
 
+// Compress without holding Ruby's GVL
+// Called via rb_thread_call_without_gvl to allow parallel Ruby thread execution
+// during CPU-intensive compression operations
 static void*
 compress_without_gvl(void* arg) {
     compress_args* args = arg;
@@ -64,7 +70,16 @@ compress_without_gvl(void* arg) {
     return NULL;
 }
 
-// CCtx compress
+// CCtx compress - Compress data using this context
+//
+// Supports per-operation parameters via keyword arguments:
+// - level: Compression level (overrides context setting for this operation)
+// - dict: CDict to use for compression
+// - pledged_size: Expected input size for optimization (optional)
+//
+// Uses ZSTD_compressBound to allocate worst-case output buffer size,
+// which is the recommended approach for one-shot compression.
+// Releases GVL during compression to allow other Ruby threads to run.
 static VALUE
 vibe_zstd_cctx_compress(int argc, VALUE* argv, VALUE self) {
     VALUE data, options = Qnil;
@@ -187,6 +202,8 @@ init_cctx_param_table(void) {
 }
 
 // Helper: look up parameter enum from symbol ID
+// Maps Ruby symbol (e.g., :compression_level) to ZSTD parameter constant
+// Returns 1 if found, 0 if unknown parameter
 static int
 lookup_cctx_param(ID symbol_id, ZSTD_cParameter* param_out, const char** name_out) {
     for (size_t i = 0; i < CCTX_PARAM_TABLE_SIZE; i++) {

@@ -3,8 +3,6 @@
 
 require_relative "helpers"
 
-include BenchmarkHelpers
-
 # Benchmark: Dictionary Training Algorithms
 # Compares train_dict, train_dict_cover, and train_dict_fast_cover
 
@@ -49,9 +47,9 @@ BenchmarkHelpers.run_comparison(title: "Dictionary Training Algorithm Comparison
   ratio_fast = test_sample.bytesize.to_f / compressed_fast.bytesize
 
   results << BenchmarkResult.new(
-    name: "train_dict",
-    compression_ratio: ratio_fast,
-    memory_bytes: dict_fast.bytesize,
+    :name => "train_dict",
+    :compression_ratio => ratio_fast,
+    :memory_bytes => dict_fast.bytesize,
     "Training time" => "#{fast_time.real.round(3)}s",
     "Compressed" => Formatter.format_bytes(compressed_fast.bytesize)
   )
@@ -77,9 +75,9 @@ BenchmarkHelpers.run_comparison(title: "Dictionary Training Algorithm Comparison
   ratio_cover = test_sample.bytesize.to_f / compressed_cover.bytesize
 
   results << BenchmarkResult.new(
-    name: "train_dict_cover",
-    compression_ratio: ratio_cover,
-    memory_bytes: dict_cover.bytesize,
+    :name => "train_dict_cover",
+    :compression_ratio => ratio_cover,
+    :memory_bytes => dict_cover.bytesize,
     "Training time" => "#{cover_time.real.round(3)}s",
     "Compressed" => Formatter.format_bytes(compressed_cover.bytesize)
   )
@@ -107,9 +105,9 @@ BenchmarkHelpers.run_comparison(title: "Dictionary Training Algorithm Comparison
   ratio_fast_cover = test_sample.bytesize.to_f / compressed_fast_cover.bytesize
 
   results << BenchmarkResult.new(
-    name: "train_dict_fast_cover",
-    compression_ratio: ratio_fast_cover,
-    memory_bytes: dict_fast_cover.bytesize,
+    :name => "train_dict_fast_cover",
+    :compression_ratio => ratio_fast_cover,
+    :memory_bytes => dict_fast_cover.bytesize,
     "Training time" => "#{fast_cover_time.real.round(3)}s",
     "Compressed" => Formatter.format_bytes(compressed_fast_cover.bytesize)
   )

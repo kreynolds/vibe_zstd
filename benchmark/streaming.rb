@@ -5,8 +5,6 @@ require_relative "helpers"
 require "stringio"
 require "tempfile"
 
-include BenchmarkHelpers
-
 # Benchmark: Streaming vs One-Shot Compression
 # Compares streaming API vs convenience methods for different use cases
 
@@ -44,8 +42,8 @@ BenchmarkHelpers.run_comparison(title: "Streaming vs One-Shot Compression") do |
       # Decompress
       compressed_io.rewind
       reader = VibeZstd::Decompress::Reader.new(compressed_io)
-      decompressed = String.new
-      while chunk = reader.read
+      decompressed = +""
+      while (chunk = reader.read)
         decompressed << chunk
       end
     end
@@ -69,8 +67,8 @@ BenchmarkHelpers.run_comparison(title: "Streaming vs One-Shot Compression") do |
       # Decompress with optimized chunk size
       compressed_io.rewind
       reader = VibeZstd::Decompress::Reader.new(compressed_io, initial_chunk_size: 8192)
-      decompressed = String.new
-      while chunk = reader.read
+      decompressed = +""
+      while (chunk = reader.read)
         decompressed << chunk
       end
     end
@@ -83,7 +81,7 @@ BenchmarkHelpers.run_comparison(title: "Streaming vs One-Shot Compression") do |
   Formatter.section("Testing: Streaming to file")
   file_streaming_time = Benchmark.measure do
     10.times do
-      Tempfile.create(['benchmark', '.zst']) do |tmpfile|
+      Tempfile.create(["benchmark", ".zst"]) do |tmpfile|
         # Compress to file
         writer = VibeZstd::Compress::Writer.new(tmpfile, level: 3)
         large_data.scan(/.{1,8192}/m).each { |chunk| writer.write(chunk) }
@@ -92,8 +90,8 @@ BenchmarkHelpers.run_comparison(title: "Streaming vs One-Shot Compression") do |
         # Decompress from file
         tmpfile.rewind
         reader = VibeZstd::Decompress::Reader.new(tmpfile)
-        decompressed = String.new
-        while chunk = reader.read
+        decompressed = +""
+        while (chunk = reader.read)
           decompressed << chunk
         end
       end
@@ -111,30 +109,30 @@ BenchmarkHelpers.run_comparison(title: "Streaming vs One-Shot Compression") do |
 
   # Collect results
   results << BenchmarkResult.new(
-    name: "One-shot",
-    iterations_per_sec: oneshot_ops_per_sec,
-    memory_bytes: oneshot_memory,
+    :name => "One-shot",
+    :iterations_per_sec => oneshot_ops_per_sec,
+    :memory_bytes => oneshot_memory,
     "Use case" => "Small data, simplicity"
   )
 
   results << BenchmarkResult.new(
-    name: "Streaming (1KB chunks)",
-    iterations_per_sec: streaming_ops_per_sec,
-    memory_bytes: streaming_memory,
+    :name => "Streaming (1KB chunks)",
+    :iterations_per_sec => streaming_ops_per_sec,
+    :memory_bytes => streaming_memory,
     "Use case" => "Large files, low memory"
   )
 
   results << BenchmarkResult.new(
-    name: "Streaming (8KB chunks)",
-    iterations_per_sec: optimized_streaming_ops_per_sec,
-    memory_bytes: streaming_memory,
+    :name => "Streaming (8KB chunks)",
+    :iterations_per_sec => optimized_streaming_ops_per_sec,
+    :memory_bytes => streaming_memory,
     "Use case" => "Balanced performance"
   )
 
   results << BenchmarkResult.new(
-    name: "File streaming",
-    iterations_per_sec: file_streaming_ops_per_sec,
-    memory_bytes: streaming_memory,
+    :name => "File streaming",
+    :iterations_per_sec => file_streaming_ops_per_sec,
+    :memory_bytes => streaming_memory,
     "Use case" => "Large files, disk I/O"
   )
 

@@ -332,4 +332,64 @@ class TestDCtx < Minitest::Test
     decompressed2 = dctx.decompress(compressed, initial_capacity: 100)
     assert_equal(data, decompressed2)
   end
+
+  def test_decompress_missing_required_dictionary
+    samples = 10.times.map { |i| {id: i, name: "User #{i}", email: "user#{i}@example.com"}.to_json }
+    dict_data = VibeZstd.train_dict(samples, max_dict_size: 2048)
+    cdict = VibeZstd::CDict.new(dict_data)
+
+    data = samples.first
+    compressed = VibeZstd.compress(data, dict: cdict)
+
+    # Try to decompress without providing required dictionary
+    dctx = VibeZstd::DCtx.new
+    error = assert_raises(ArgumentError) do
+      dctx.decompress(compressed)
+    end
+    assert_match(/requires dictionary/i, error.message)
+    assert_match(/#{cdict.dict_id}/, error.message)
+  end
+
+  def test_decompress_wrong_dictionary
+    samples1 = 10.times.map { |i| {id: i, type: "user", name: "User #{i}"}.to_json }
+    samples2 = 10.times.map { |i| {id: i, type: "product", sku: "SKU#{i}"}.to_json }
+
+    dict_data1 = VibeZstd.train_dict(samples1, max_dict_size: 2048)
+    dict_data2 = VibeZstd.train_dict(samples2, max_dict_size: 2048)
+
+    cdict1 = VibeZstd::CDict.new(dict_data1)
+    ddict1 = VibeZstd::DDict.new(dict_data1)
+    ddict2 = VibeZstd::DDict.new(dict_data2)
+
+    data = samples1.first
+    compressed = VibeZstd.compress(data, dict: cdict1)
+
+    # Try to decompress with wrong dictionary
+    dctx = VibeZstd::DCtx.new
+    error = assert_raises(ArgumentError) do
+      dctx.decompress(compressed, dict: ddict2)
+    end
+    assert_match(/dictionary mismatch/i, error.message)
+    assert_match(/#{cdict1.dict_id}/, error.message)
+    assert_match(/#{ddict2.dict_id}/, error.message)
+
+    # Correct dictionary should work
+    result = dctx.decompress(compressed, dict: ddict1)
+    assert_equal(data, result)
+  end
+
+  def test_decompress_with_dict_when_none_required
+    data = "Test data without dictionary"
+    compressed = VibeZstd.compress(data)
+
+    # Create a dictionary (won't be used)
+    samples = 10.times.map { |i| {id: i, data: "sample #{i}"}.to_json }
+    dict_data = VibeZstd.train_dict(samples, max_dict_size: 2048)
+    ddict = VibeZstd::DDict.new(dict_data)
+
+    # Decompress with dictionary when none required - should ignore dict and work
+    dctx = VibeZstd::DCtx.new
+    result = dctx.decompress(compressed, dict: ddict)
+    assert_equal(data, result)
+  end
 end

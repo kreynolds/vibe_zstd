@@ -34,13 +34,7 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
   spec.extensions = ["ext/vibe_zstd/extconf.rb"]
 
-  # Uncomment to register a new dependency of your gem
-  # spec.add_dependency "example-gem", "~> 1.0"
-
   # Development dependencies
   spec.add_development_dependency "benchmark-ips", "~> 2.0"
   spec.add_development_dependency "terminal-table", "~> 3.0"
-
-  # For more information and examples about making a new gem, check out our
-  # guide at: https://bundler.io/guides/creating_gem.html
 end

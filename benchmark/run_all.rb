@@ -5,14 +5,12 @@
 
 require_relative "helpers"
 
-include BenchmarkHelpers
-
 Formatter.header("VibeZstd Comprehensive Benchmark Suite")
 
 puts "Ruby version: #{RUBY_VERSION}"
 puts "Platform: #{RUBY_PLATFORM}"
 puts "Zstd version: #{VibeZstd.version_string}"
-puts "Date: #{Time.now.strftime('%Y-%m-%d %H:%M:%S')}"
+puts "Date: #{Time.now.strftime("%Y-%m-%d %H:%M:%S")}"
 puts
 
 # Check for fixture
@@ -58,7 +56,7 @@ benchmarks = [
 ]
 
 # Option parsing
-require 'optparse'
+require "optparse"
 
 options = {
   list: false,
@@ -122,11 +120,11 @@ benchmarks_to_run.each_with_index do |bench, i|
 
   begin
     load File.join(__dir__, bench[:file])
-    results << { name: bench[:name], status: "✓ Completed" }
+    results << {name: bench[:name], status: "✓ Completed"}
   rescue => e
     puts "\n❌ Error running #{bench[:name]}: #{e.message}"
     puts e.backtrace.first(5)
-    results << { name: bench[:name], status: "✗ Failed: #{e.message}" }
+    results << {name: bench[:name], status: "✗ Failed: #{e.message}"}
   end
 
   # Add separator between benchmarks

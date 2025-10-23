@@ -3,8 +3,6 @@
 
 require_relative "helpers"
 
-include BenchmarkHelpers
-
 # Benchmark: Dictionary Usage Performance
 # Demonstrates compression ratio and speed improvements when using trained dictionaries
 
@@ -90,18 +88,18 @@ BenchmarkHelpers.run_comparison(title: "Dictionary Usage Performance Comparison"
 
   # Collect results
   results << BenchmarkResult.new(
-    name: "Without dictionary",
-    iterations_per_sec: no_dict_ops_per_sec,
-    compression_ratio: compression_ratio_no_dict,
-    memory_bytes: Memory.estimate_cctx + Memory.estimate_dctx,
+    :name => "Without dictionary",
+    :iterations_per_sec => no_dict_ops_per_sec,
+    :compression_ratio => compression_ratio_no_dict,
+    :memory_bytes => Memory.estimate_cctx + Memory.estimate_dctx,
     "Avg compressed size" => Formatter.format_bytes(avg_compressed_no_dict.to_i)
   )
 
   results << BenchmarkResult.new(
-    name: "With dictionary",
-    iterations_per_sec: with_dict_ops_per_sec,
-    compression_ratio: compression_ratio_with_dict,
-    memory_bytes: Memory.estimate_cctx + Memory.estimate_dctx + dict_memory_overhead,
+    :name => "With dictionary",
+    :iterations_per_sec => with_dict_ops_per_sec,
+    :compression_ratio => compression_ratio_with_dict,
+    :memory_bytes => Memory.estimate_cctx + Memory.estimate_dctx + dict_memory_overhead,
     "Avg compressed size" => Formatter.format_bytes(avg_compressed_with_dict.to_i)
   )
 

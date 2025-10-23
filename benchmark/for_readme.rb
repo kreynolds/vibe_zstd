@@ -4,7 +4,6 @@
 # Quick benchmark script to generate results for README
 
 require_relative "helpers"
-include BenchmarkHelpers
 
 puts "# Performance Benchmarks\n\n"
 puts "Results from Ruby #{RUBY_VERSION} on #{RUBY_PLATFORM}, Zstd #{VibeZstd.version_string}\n\n"
@@ -65,14 +64,14 @@ puts "Compression with vs without trained dictionaries (100 JSON samples):\n\n"
 dict_path = File.join(__dir__, "..", "test", "fixtures", "sample.dict")
 dict_data = File.binread(dict_path)
 cdict = VibeZstd::CDict.new(dict_data)
-ddict = VibeZstd::DDict.new(dict_data)
+VibeZstd::DDict.new(dict_data)
 
 test_sample = {
   id: 999,
   name: "Test User",
   email: "test@example.com",
   status: "active",
-  preferences: { theme: "dark", notifications: true }
+  preferences: {theme: "dark", notifications: true}
 }.to_json
 
 compressed_no_dict = VibeZstd.compress(test_sample)

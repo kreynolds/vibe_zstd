@@ -3,8 +3,6 @@
 
 require_relative "helpers"
 
-include BenchmarkHelpers
-
 # Benchmark: Compression Levels Speed vs Ratio
 # Demonstrates the trade-off between compression speed and compression ratio
 
@@ -19,7 +17,7 @@ BenchmarkHelpers.run_comparison(title: "Compression Levels: Speed vs Ratio") do 
   # Levels to test: negative (ultra-fast), low, default, medium, high, max
   levels_to_test = [-1, 1, 3, 9, 15, 19, 22]
 
-  puts "Testing compression levels: #{levels_to_test.join(', ')}\n"
+  puts "Testing compression levels: #{levels_to_test.join(", ")}\n"
   puts "Min level: #{VibeZstd.min_compression_level}"
   puts "Max level: #{VibeZstd.max_compression_level}"
   puts "Default level: #{VibeZstd.default_compression_level}\n\n"
@@ -82,10 +80,10 @@ BenchmarkHelpers.run_comparison(title: "Compression Levels: Speed vs Ratio") do 
     memory = Memory.estimate_cctx(level)
 
     results << BenchmarkResult.new(
-      name: "Level #{level}",
-      iterations_per_sec: ops_per_sec,
-      compression_ratio: compression_ratio,
-      memory_bytes: memory,
+      :name => "Level #{level}",
+      :iterations_per_sec => ops_per_sec,
+      :compression_ratio => compression_ratio,
+      :memory_bytes => memory,
       "Compressed" => Formatter.format_bytes(compressed.bytesize)
     )
   end

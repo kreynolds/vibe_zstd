@@ -3,8 +3,6 @@
 
 require_relative "helpers"
 
-include BenchmarkHelpers
-
 # Benchmark: Multi-threaded Compression Performance
 # Demonstrates the performance impact of using multiple worker threads
 
@@ -12,13 +10,17 @@ BenchmarkHelpers.run_comparison(title: "Multi-threaded Compression Performance")
   # Generate large test data (multi-threading only helps with larger data)
   large_data = DataGenerator.mixed_data(size: 500_000)
   puts "Test data size: #{Formatter.format_bytes(large_data.bytesize)}"
-  puts "CPU cores available: #{`sysctl -n hw.ncpu`.strip rescue 'unknown'}\n\n"
+  puts "CPU cores available: #{begin
+    `sysctl -n hw.ncpu`.strip
+  rescue
+    "unknown"
+  end}\n\n"
 
   # Test with different worker counts
   worker_counts = [0, 1, 2, 4, 8]
 
   worker_counts.each do |workers|
-    Formatter.section("Testing: #{workers} worker#{workers == 1 ? '' : 's'} #{workers == 0 ? '(single-threaded)' : ''}")
+    Formatter.section("Testing: #{workers} worker#{(workers == 1) ? "" : "s"} #{(workers == 0) ? "(single-threaded)" : ""}")
 
     cctx = VibeZstd::CCtx.new
     cctx.nb_workers = workers if workers > 0
@@ -40,10 +42,10 @@ BenchmarkHelpers.run_comparison(title: "Multi-threaded Compression Performance")
     puts "Throughput: #{Formatter.format_bytes((large_data.bytesize * 10 / time.real).to_i)}/sec"
 
     results << BenchmarkResult.new(
-      name: "#{workers} worker#{'s' unless workers == 1}",
-      iterations_per_sec: ops_per_sec,
-      compression_ratio: compression_ratio,
-      memory_bytes: memory,
+      :name => "#{workers} worker#{"s" unless workers == 1}",
+      :iterations_per_sec => ops_per_sec,
+      :compression_ratio => compression_ratio,
+      :memory_bytes => memory,
       "Throughput" => "#{Formatter.format_bytes((large_data.bytesize * 10 / time.real).to_i)}/s"
     )
   end
@@ -54,9 +56,13 @@ BenchmarkHelpers.run_comparison(title: "Multi-threaded Compression Performance")
   baseline = results[0].iterations_per_sec
   results.each do |result|
     speedup = result.iterations_per_sec / baseline
-    efficiency = (speedup / result.name.split.first.to_i * 100).round(1) rescue 100.0
+    efficiency = begin
+      (speedup / result.name.split.first.to_i * 100).round(1)
+    rescue
+      100.0
+    end
     puts "  #{result.name}: #{Formatter.format_ratio(speedup)} speedup" +
-         (result.name != "0 workers" ? " (#{efficiency}% efficient)" : "")
+      ((result.name != "0 workers") ? " (#{efficiency}% efficient)" : "")
   end
 
   # Test with job_size parameter

@@ -66,6 +66,8 @@ init_dctx_param_table(void) {
 }
 
 // Helper: look up DCtx parameter enum from symbol ID
+// Maps Ruby symbol (e.g., :window_log_max) to ZSTD parameter constant
+// Returns 1 if found, 0 if unknown parameter
 static int
 lookup_dctx_param(ID symbol_id, ZSTD_dParameter* param_out, const char** name_out) {
     for (size_t i = 0; i < DCTX_PARAM_TABLE_SIZE; i++) {
@@ -214,7 +216,10 @@ vibe_zstd_dctx_set_initial_capacity(VALUE self, VALUE value) {
     return value;
 }
 
-// Decompress args for GVL
+// Decompress args for GVL release
+// This structure packages all arguments needed for decompression so we can
+// call ZSTD functions without holding Ruby's Global VM Lock (GVL).
+// Releasing the GVL allows other Ruby threads to run during CPU-intensive decompression.
 typedef struct {
     ZSTD_DCtx* dctx;
     ZSTD_DDict* ddict;
@@ -225,6 +230,9 @@ typedef struct {
     size_t result;
 } decompress_args;
 
+// Decompress without holding Ruby's GVL
+// Called via rb_thread_call_without_gvl to allow parallel Ruby thread execution
+// during CPU-intensive decompression operations
 static void*
 decompress_without_gvl(void* arg) {
     decompress_args* args = arg;
@@ -253,7 +261,18 @@ vibe_zstd_dctx_frame_content_size(VALUE self, VALUE data) {
     return ULL2NUM(contentSize);
 }
 
-// DCtx decompress
+// DCtx decompress - Decompress ZSTD-compressed data
+//
+// This function handles two decompression paths:
+// 1. Known content size: Allocates exact buffer size and decompresses in one shot
+// 2. Unknown content size: Uses streaming decompression with exponential buffer growth
+//
+// The unknown-size path uses a standard exponential growth strategy (doubling)
+// which provides optimal O(n) amortized performance. Initial capacity can be
+// configured via initial_capacity parameter to reduce reallocations for known size ranges.
+//
+// Dictionary validation is performed to ensure frame requirements match provided dict.
+// Skippable frames at the beginning of data are automatically skipped.
 static VALUE
 vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
     VALUE data, options = Qnil;
@@ -287,8 +306,12 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
         rb_raise(rb_eRuntimeError, "Invalid compressed data: not a valid zstd frame (size: %zu bytes)", srcSize);
     }
 
+    // Check dictionary requirements from the frame
+    unsigned int frame_dict_id = ZSTD_getDictID_fromFrame(src, srcSize);
+
     // Extract keyword arguments
     ZSTD_DDict* ddict = NULL;
+    unsigned int provided_dict_id = 0;
     size_t initial_capacity = 0;  // 0 = not specified in per-call options
 
     if (!NIL_P(options)) {
@@ -297,6 +320,7 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
             vibe_zstd_ddict* ddict_struct;
             TypedData_Get_Struct(dict_val, vibe_zstd_ddict, &vibe_zstd_ddict_type, ddict_struct);
             ddict = ddict_struct->ddict;
+            provided_dict_id = ZSTD_getDictID_fromDDict(ddict);
         }
 
         VALUE initial_capacity_val = rb_hash_aref(options, ID2SYM(rb_intern("initial_capacity")));
@@ -306,6 +330,16 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
                 rb_raise(rb_eArgError, "initial_capacity must be positive");
             }
         }
+    }
+
+    // Validate dictionary matches frame requirements
+    if (frame_dict_id != 0 && ddict == NULL) {
+        rb_raise(rb_eArgError, "Data requires dictionary (dict_id: %u) but none provided", frame_dict_id);
+    }
+
+    if (ddict != NULL && frame_dict_id != 0 && provided_dict_id != frame_dict_id) {
+        rb_raise(rb_eArgError, "Dictionary mismatch: frame requires dict_id %u, provided dict_id %u",
+                 frame_dict_id, provided_dict_id);
     }
 
     // Resolve initial_capacity fallback chain: per-call > instance > class default > ZSTD default

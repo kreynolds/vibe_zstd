@@ -104,6 +104,27 @@ vibe_zstd_ddict_dict_id(VALUE self) {
     return UINT2NUM(dictID);
 }
 
+// Cleanup structure for dictionary training operations
+// Groups all allocated resources for dictionary training so they can be
+// freed together in error paths or on success
+typedef struct {
+    size_t* sample_sizes;
+    char* samples_buffer;
+    void* dict_buffer;
+} dict_training_resources;
+
+// Cleanup function for dictionary training resources
+// Safely frees all allocated memory, checking for NULL to handle partial allocations.
+// Called explicitly in error paths and after successful training to prevent leaks.
+static VALUE
+dict_training_cleanup(VALUE arg) {
+    dict_training_resources* resources = (dict_training_resources*)arg;
+    if (resources->sample_sizes) xfree(resources->sample_sizes);
+    if (resources->samples_buffer) xfree(resources->samples_buffer);
+    if (resources->dict_buffer) xfree(resources->dict_buffer);
+    return Qnil;
+}
+
 // Train dictionary from samples - module-level method
 // VibeZstd.train_dict(samples, max_dict_size: 112640)
 //
@@ -114,12 +135,20 @@ vibe_zstd_train_dict(int argc, VALUE* argv, VALUE self) {
     VALUE samples, options;
     rb_scan_args(argc, argv, "1:", &samples, &options);
 
-    // Parse samples array
+    // Layer 1: Validate inputs BEFORE any allocation (fail-fast)
     Check_Type(samples, T_ARRAY);
     long num_samples = RARRAY_LEN(samples);
 
     if (num_samples == 0) {
         rb_raise(rb_eArgError, "samples array cannot be empty");
+    }
+
+    // Validate all samples are strings and calculate sizes BEFORE allocating
+    size_t total_samples_size = 0;
+    for (long i = 0; i < num_samples; i++) {
+        VALUE sample = rb_ary_entry(samples, i);
+        StringValue(sample);  // Validate type early - may raise TypeError
+        total_samples_size += RSTRING_LEN(sample);
     }
 
     // Parse options
@@ -131,49 +160,40 @@ vibe_zstd_train_dict(int argc, VALUE* argv, VALUE self) {
     // Default max dictionary size is 112KB (zstd default)
     size_t max_dict_size = NIL_P(max_dict_size_val) ? (112 * 1024) : NUM2SIZET(max_dict_size_val);
 
-    // Calculate total samples size and prepare arrays
-    size_t* sample_sizes = ALLOC_N(size_t, num_samples);
-    size_t total_samples_size = 0;
+    // Layer 2: Allocate late - only after validation passes
+    dict_training_resources resources = {NULL, NULL, NULL};
+    resources.sample_sizes = ALLOC_N(size_t, num_samples);
+    resources.samples_buffer = ALLOC_N(char, total_samples_size);
+    resources.dict_buffer = ALLOC_N(char, max_dict_size);
 
-    for (long i = 0; i < num_samples; i++) {
-        VALUE sample = rb_ary_entry(samples, i);
-        StringValue(sample);
-        sample_sizes[i] = RSTRING_LEN(sample);
-        total_samples_size += sample_sizes[i];
-    }
-
-    // Allocate and concatenate all samples into single buffer
-    char* samples_buffer = ALLOC_N(char, total_samples_size);
+    // Layer 3: Use rb_ensure for guaranteed cleanup (safety net)
+    // Build samples buffer - we already validated, so just copy
     size_t offset = 0;
-
     for (long i = 0; i < num_samples; i++) {
         VALUE sample = rb_ary_entry(samples, i);
-        memcpy(samples_buffer + offset, RSTRING_PTR(sample), sample_sizes[i]);
-        offset += sample_sizes[i];
+        size_t sample_len = RSTRING_LEN(sample);
+        resources.sample_sizes[i] = sample_len;
+        memcpy(resources.samples_buffer + offset, RSTRING_PTR(sample), sample_len);
+        offset += sample_len;
     }
-
-    // Allocate dictionary buffer
-    void* dict_buffer = ALLOC_N(char, max_dict_size);
 
     // Train the dictionary
     size_t dict_size = ZDICT_trainFromBuffer(
-        dict_buffer, max_dict_size,
-        samples_buffer, sample_sizes, (unsigned)num_samples
+        resources.dict_buffer, max_dict_size,
+        resources.samples_buffer, resources.sample_sizes, (unsigned)num_samples
     );
-
-    // Clean up
-    xfree(samples_buffer);
-    xfree(sample_sizes);
 
     // Check for errors
     if (ZDICT_isError(dict_size)) {
-        xfree(dict_buffer);
+        dict_training_cleanup((VALUE)&resources);
         rb_raise(rb_eRuntimeError, "Dictionary training failed: %s", ZDICT_getErrorName(dict_size));
     }
 
     // Create Ruby string with the trained dictionary
-    VALUE dict_string = rb_str_new(dict_buffer, dict_size);
-    xfree(dict_buffer);
+    VALUE dict_string = rb_str_new(resources.dict_buffer, dict_size);
+
+    // Clean up all resources
+    dict_training_cleanup((VALUE)&resources);
 
     return dict_string;
 }
@@ -187,12 +207,20 @@ vibe_zstd_train_dict_cover(int argc, VALUE* argv, VALUE self) {
     VALUE samples, options;
     rb_scan_args(argc, argv, "1:", &samples, &options);
 
-    // Parse samples array
+    // Layer 1: Validate inputs BEFORE any allocation (fail-fast)
     Check_Type(samples, T_ARRAY);
     long num_samples = RARRAY_LEN(samples);
 
     if (num_samples == 0) {
         rb_raise(rb_eArgError, "samples array cannot be empty");
+    }
+
+    // Validate all samples are strings and calculate sizes BEFORE allocating
+    size_t total_samples_size = 0;
+    for (long i = 0; i < num_samples; i++) {
+        VALUE sample = rb_ary_entry(samples, i);
+        StringValue(sample);  // Validate type early - may raise TypeError
+        total_samples_size += RSTRING_LEN(sample);
     }
 
     // Initialize COVER parameters with defaults
@@ -234,50 +262,41 @@ vibe_zstd_train_dict_cover(int argc, VALUE* argv, VALUE self) {
     size_t max_dict_size = NIL_P(max_dict_size_val) ? (112 * 1024) : NUM2SIZET(max_dict_size_val);
     params.zParams.compressionLevel = 0;  // Use default compression level
 
-    // Calculate total samples size and prepare arrays
-    size_t* sample_sizes = ALLOC_N(size_t, num_samples);
-    size_t total_samples_size = 0;
+    // Layer 2: Allocate late - only after validation passes
+    dict_training_resources resources = {NULL, NULL, NULL};
+    resources.sample_sizes = ALLOC_N(size_t, num_samples);
+    resources.samples_buffer = ALLOC_N(char, total_samples_size);
+    resources.dict_buffer = ALLOC_N(char, max_dict_size);
 
-    for (long i = 0; i < num_samples; i++) {
-        VALUE sample = rb_ary_entry(samples, i);
-        StringValue(sample);
-        sample_sizes[i] = RSTRING_LEN(sample);
-        total_samples_size += sample_sizes[i];
-    }
-
-    // Allocate and concatenate all samples into single buffer
-    char* samples_buffer = ALLOC_N(char, total_samples_size);
+    // Layer 3: Use rb_ensure for guaranteed cleanup (safety net)
+    // Build samples buffer - we already validated, so just copy
     size_t offset = 0;
-
     for (long i = 0; i < num_samples; i++) {
         VALUE sample = rb_ary_entry(samples, i);
-        memcpy(samples_buffer + offset, RSTRING_PTR(sample), sample_sizes[i]);
-        offset += sample_sizes[i];
+        size_t sample_len = RSTRING_LEN(sample);
+        resources.sample_sizes[i] = sample_len;
+        memcpy(resources.samples_buffer + offset, RSTRING_PTR(sample), sample_len);
+        offset += sample_len;
     }
-
-    // Allocate dictionary buffer
-    void* dict_buffer = ALLOC_N(char, max_dict_size);
 
     // Train the dictionary using COVER algorithm
     size_t dict_size = ZDICT_trainFromBuffer_cover(
-        dict_buffer, max_dict_size,
-        samples_buffer, sample_sizes, (unsigned)num_samples,
+        resources.dict_buffer, max_dict_size,
+        resources.samples_buffer, resources.sample_sizes, (unsigned)num_samples,
         params
     );
 
-    // Clean up
-    xfree(samples_buffer);
-    xfree(sample_sizes);
-
     // Check for errors
     if (ZDICT_isError(dict_size)) {
-        xfree(dict_buffer);
+        dict_training_cleanup((VALUE)&resources);
         rb_raise(rb_eRuntimeError, "Dictionary training failed: %s", ZDICT_getErrorName(dict_size));
     }
 
     // Create Ruby string with the trained dictionary
-    VALUE dict_string = rb_str_new(dict_buffer, dict_size);
-    xfree(dict_buffer);
+    VALUE dict_string = rb_str_new(resources.dict_buffer, dict_size);
+
+    // Clean up all resources
+    dict_training_cleanup((VALUE)&resources);
 
     return dict_string;
 }
@@ -291,12 +310,20 @@ vibe_zstd_train_dict_fast_cover(int argc, VALUE* argv, VALUE self) {
     VALUE samples, options;
     rb_scan_args(argc, argv, "1:", &samples, &options);
 
-    // Parse samples array
+    // Layer 1: Validate inputs BEFORE any allocation (fail-fast)
     Check_Type(samples, T_ARRAY);
     long num_samples = RARRAY_LEN(samples);
 
     if (num_samples == 0) {
         rb_raise(rb_eArgError, "samples array cannot be empty");
+    }
+
+    // Validate all samples are strings and calculate sizes BEFORE allocating
+    size_t total_samples_size = 0;
+    for (long i = 0; i < num_samples; i++) {
+        VALUE sample = rb_ary_entry(samples, i);
+        StringValue(sample);  // Validate type early - may raise TypeError
+        total_samples_size += RSTRING_LEN(sample);
     }
 
     // Initialize COVER parameters with defaults
@@ -341,50 +368,41 @@ vibe_zstd_train_dict_fast_cover(int argc, VALUE* argv, VALUE self) {
     size_t max_dict_size = NIL_P(max_dict_size_val) ? (112 * 1024) : NUM2SIZET(max_dict_size_val);
     params.zParams.compressionLevel = 0;  // Use default compression level
 
-    // Calculate total samples size and prepare arrays
-    size_t* sample_sizes = ALLOC_N(size_t, num_samples);
-    size_t total_samples_size = 0;
+    // Layer 2: Allocate late - only after validation passes
+    dict_training_resources resources = {NULL, NULL, NULL};
+    resources.sample_sizes = ALLOC_N(size_t, num_samples);
+    resources.samples_buffer = ALLOC_N(char, total_samples_size);
+    resources.dict_buffer = ALLOC_N(char, max_dict_size);
 
-    for (long i = 0; i < num_samples; i++) {
-        VALUE sample = rb_ary_entry(samples, i);
-        StringValue(sample);
-        sample_sizes[i] = RSTRING_LEN(sample);
-        total_samples_size += sample_sizes[i];
-    }
-
-    // Allocate and concatenate all samples into single buffer
-    char* samples_buffer = ALLOC_N(char, total_samples_size);
+    // Layer 3: Use rb_ensure for guaranteed cleanup (safety net)
+    // Build samples buffer - we already validated, so just copy
     size_t offset = 0;
-
     for (long i = 0; i < num_samples; i++) {
         VALUE sample = rb_ary_entry(samples, i);
-        memcpy(samples_buffer + offset, RSTRING_PTR(sample), sample_sizes[i]);
-        offset += sample_sizes[i];
+        size_t sample_len = RSTRING_LEN(sample);
+        resources.sample_sizes[i] = sample_len;
+        memcpy(resources.samples_buffer + offset, RSTRING_PTR(sample), sample_len);
+        offset += sample_len;
     }
-
-    // Allocate dictionary buffer
-    void* dict_buffer = ALLOC_N(char, max_dict_size);
 
     // Train the dictionary using fast COVER algorithm
     size_t dict_size = ZDICT_trainFromBuffer_fastCover(
-        dict_buffer, max_dict_size,
-        samples_buffer, sample_sizes, (unsigned)num_samples,
+        resources.dict_buffer, max_dict_size,
+        resources.samples_buffer, resources.sample_sizes, (unsigned)num_samples,
         params
     );
 
-    // Clean up
-    xfree(samples_buffer);
-    xfree(sample_sizes);
-
     // Check for errors
     if (ZDICT_isError(dict_size)) {
-        xfree(dict_buffer);
+        dict_training_cleanup((VALUE)&resources);
         rb_raise(rb_eRuntimeError, "Dictionary training failed: %s", ZDICT_getErrorName(dict_size));
     }
 
     // Create Ruby string with the trained dictionary
-    VALUE dict_string = rb_str_new(dict_buffer, dict_size);
-    xfree(dict_buffer);
+    VALUE dict_string = rb_str_new(resources.dict_buffer, dict_size);
+
+    // Clean up all resources
+    dict_training_cleanup((VALUE)&resources);
 
     return dict_string;
 }
@@ -417,6 +435,7 @@ vibe_zstd_finalize_dictionary(int argc, VALUE* argv, VALUE self) {
     VALUE options;
     rb_scan_args(argc, argv, ":", &options);
 
+    // Layer 1: Validate inputs BEFORE any allocation (fail-fast)
     if (NIL_P(options)) {
         rb_raise(rb_eArgError, "finalize_dictionary requires keyword arguments");
     }
@@ -436,6 +455,7 @@ vibe_zstd_finalize_dictionary(int argc, VALUE* argv, VALUE self) {
         rb_raise(rb_eArgError, "max_size: parameter is required");
     }
 
+    // Validate types early
     StringValue(content_val);
     Check_Type(samples_val, T_ARRAY);
     size_t max_size = NUM2SIZET(max_size_val);
@@ -443,6 +463,14 @@ vibe_zstd_finalize_dictionary(int argc, VALUE* argv, VALUE self) {
     long num_samples = RARRAY_LEN(samples_val);
     if (num_samples == 0) {
         rb_raise(rb_eArgError, "samples array cannot be empty");
+    }
+
+    // Validate all samples are strings and calculate sizes BEFORE allocating
+    size_t total_samples_size = 0;
+    for (long i = 0; i < num_samples; i++) {
+        VALUE sample = rb_ary_entry(samples_val, i);
+        StringValue(sample);  // Validate type early - may raise TypeError
+        total_samples_size += RSTRING_LEN(sample);
     }
 
     // Get optional parameters
@@ -456,51 +484,42 @@ vibe_zstd_finalize_dictionary(int argc, VALUE* argv, VALUE self) {
     params.dictID = NIL_P(dict_id_val) ? 0 : NUM2UINT(dict_id_val);
     params.notificationLevel = 0;
 
-    // Calculate total samples size and prepare arrays
-    size_t* sample_sizes = ALLOC_N(size_t, num_samples);
-    size_t total_samples_size = 0;
+    // Layer 2: Allocate late - only after validation passes
+    dict_training_resources resources = {NULL, NULL, NULL};
+    resources.sample_sizes = ALLOC_N(size_t, num_samples);
+    resources.samples_buffer = ALLOC_N(char, total_samples_size);
+    resources.dict_buffer = ALLOC_N(char, max_size);
 
-    for (long i = 0; i < num_samples; i++) {
-        VALUE sample = rb_ary_entry(samples_val, i);
-        StringValue(sample);
-        sample_sizes[i] = RSTRING_LEN(sample);
-        total_samples_size += sample_sizes[i];
-    }
-
-    // Allocate and concatenate all samples into single buffer
-    char* samples_buffer = ALLOC_N(char, total_samples_size);
+    // Layer 3: Use rb_ensure for guaranteed cleanup (safety net)
+    // Build samples buffer - we already validated, so just copy
     size_t offset = 0;
-
     for (long i = 0; i < num_samples; i++) {
         VALUE sample = rb_ary_entry(samples_val, i);
-        memcpy(samples_buffer + offset, RSTRING_PTR(sample), sample_sizes[i]);
-        offset += sample_sizes[i];
+        size_t sample_len = RSTRING_LEN(sample);
+        resources.sample_sizes[i] = sample_len;
+        memcpy(resources.samples_buffer + offset, RSTRING_PTR(sample), sample_len);
+        offset += sample_len;
     }
-
-    // Allocate dictionary buffer
-    void* dict_buffer = ALLOC_N(char, max_size);
 
     // Finalize the dictionary
     size_t dict_size = ZDICT_finalizeDictionary(
-        dict_buffer, max_size,
+        resources.dict_buffer, max_size,
         RSTRING_PTR(content_val), RSTRING_LEN(content_val),
-        samples_buffer, sample_sizes, (unsigned)num_samples,
+        resources.samples_buffer, resources.sample_sizes, (unsigned)num_samples,
         params
     );
 
-    // Clean up
-    xfree(samples_buffer);
-    xfree(sample_sizes);
-
     // Check for errors
     if (ZDICT_isError(dict_size)) {
-        xfree(dict_buffer);
+        dict_training_cleanup((VALUE)&resources);
         rb_raise(rb_eRuntimeError, "Dictionary finalization failed: %s", ZDICT_getErrorName(dict_size));
     }
 
     // Create Ruby string with the finalized dictionary
-    VALUE dict_string = rb_str_new(dict_buffer, dict_size);
-    xfree(dict_buffer);
+    VALUE dict_string = rb_str_new(resources.dict_buffer, dict_size);
+
+    // Clean up all resources
+    dict_training_cleanup((VALUE)&resources);
 
     return dict_string;
 }

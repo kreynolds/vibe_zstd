@@ -3,8 +3,6 @@
 
 require_relative "helpers"
 
-include BenchmarkHelpers
-
 # Benchmark: Context Reuse vs New Context Creation
 # This demonstrates the performance benefit of reusing compression/decompression contexts
 
@@ -42,7 +40,7 @@ BenchmarkHelpers.run_comparison(title: "Context Reuse Performance Comparison") d
     puts "#{new_context_time.real.round(3)}s (#{Formatter.format_number(new_context_ops_per_sec.to_i)} ops/sec)"
 
     # Benchmark 2: Reusing contexts (efficient)
-    print "  Reused context: "
+    print "  Reused context (no reset): "
     reused_context_time = Benchmark.measure do
       cctx = VibeZstd::CCtx.new
       dctx = VibeZstd::DCtx.new
@@ -56,22 +54,103 @@ BenchmarkHelpers.run_comparison(title: "Context Reuse Performance Comparison") d
     puts "#{reused_context_time.real.round(3)}s (#{Formatter.format_number(reused_context_ops_per_sec.to_i)} ops/sec)"
 
     speedup = reused_context_ops_per_sec / new_context_ops_per_sec
-    puts "  → Speedup: #{Formatter.format_ratio(speedup)}\n\n"
+    puts "  → Speedup: #{Formatter.format_ratio(speedup)}"
+
+    # Benchmark 3: Reusing contexts with reset(:session)
+    print "  Reused + reset(:session): "
+    reused_reset_session_time = Benchmark.measure do
+      cctx = VibeZstd::CCtx.new
+      dctx = VibeZstd::DCtx.new
+
+      iterations.times do
+        compressed = cctx.compress(test_data)
+        dctx.decompress(compressed)
+        cctx.reset(VibeZstd::ResetDirective::SESSION)
+        dctx.reset(VibeZstd::ResetDirective::SESSION)
+      end
+    end
+    reused_reset_session_ops_per_sec = iterations / reused_reset_session_time.real
+    puts "#{reused_reset_session_time.real.round(3)}s (#{Formatter.format_number(reused_reset_session_ops_per_sec.to_i)} ops/sec)"
+
+    session_speedup = reused_reset_session_ops_per_sec / new_context_ops_per_sec
+    puts "  → Speedup: #{Formatter.format_ratio(session_speedup)}"
+
+    # Benchmark 4: Reusing contexts with reset(:parameters)
+    print "  Reused + reset(:parameters): "
+    reused_reset_params_time = Benchmark.measure do
+      cctx = VibeZstd::CCtx.new
+      dctx = VibeZstd::DCtx.new
+
+      iterations.times do
+        compressed = cctx.compress(test_data)
+        dctx.decompress(compressed)
+        cctx.reset(VibeZstd::ResetDirective::PARAMETERS)
+        dctx.reset(VibeZstd::ResetDirective::PARAMETERS)
+      end
+    end
+    reused_reset_params_ops_per_sec = iterations / reused_reset_params_time.real
+    puts "#{reused_reset_params_time.real.round(3)}s (#{Formatter.format_number(reused_reset_params_ops_per_sec.to_i)} ops/sec)"
+
+    params_speedup = reused_reset_params_ops_per_sec / new_context_ops_per_sec
+    puts "  → Speedup: #{Formatter.format_ratio(params_speedup)}"
+
+    # Benchmark 5: Reusing contexts with reset(:both)
+    print "  Reused + reset(:both): "
+    reused_reset_both_time = Benchmark.measure do
+      cctx = VibeZstd::CCtx.new
+      dctx = VibeZstd::DCtx.new
+
+      iterations.times do
+        compressed = cctx.compress(test_data)
+        dctx.decompress(compressed)
+        cctx.reset(VibeZstd::ResetDirective::BOTH)
+        dctx.reset(VibeZstd::ResetDirective::BOTH)
+      end
+    end
+    reused_reset_both_ops_per_sec = iterations / reused_reset_both_time.real
+    puts "#{reused_reset_both_time.real.round(3)}s (#{Formatter.format_number(reused_reset_both_ops_per_sec.to_i)} ops/sec)"
+
+    both_speedup = reused_reset_both_ops_per_sec / new_context_ops_per_sec
+    puts "  → Speedup: #{Formatter.format_ratio(both_speedup)}\n\n"
 
     # Collect results for this data size
     results << BenchmarkResult.new(
-      name: "#{size_label} - New ctx",
-      iterations_per_sec: new_context_ops_per_sec,
+      :name => "#{size_label} - New ctx",
+      :iterations_per_sec => new_context_ops_per_sec,
       "Data size" => Formatter.format_bytes(test_data.bytesize),
       "Time (#{iterations})" => "#{new_context_time.real.round(3)}s"
     )
 
     results << BenchmarkResult.new(
-      name: "#{size_label} - Reused",
-      iterations_per_sec: reused_context_ops_per_sec,
+      :name => "#{size_label} - Reused (no reset)",
+      :iterations_per_sec => reused_context_ops_per_sec,
       "Data size" => Formatter.format_bytes(test_data.bytesize),
       "Time (#{iterations})" => "#{reused_context_time.real.round(3)}s",
       "Speedup" => "#{speedup.round(2)}x"
+    )
+
+    results << BenchmarkResult.new(
+      :name => "#{size_label} - Reused + reset(:session)",
+      :iterations_per_sec => reused_reset_session_ops_per_sec,
+      "Data size" => Formatter.format_bytes(test_data.bytesize),
+      "Time (#{iterations})" => "#{reused_reset_session_time.real.round(3)}s",
+      "Speedup" => "#{session_speedup.round(2)}x"
+    )
+
+    results << BenchmarkResult.new(
+      :name => "#{size_label} - Reused + reset(:parameters)",
+      :iterations_per_sec => reused_reset_params_ops_per_sec,
+      "Data size" => Formatter.format_bytes(test_data.bytesize),
+      "Time (#{iterations})" => "#{reused_reset_params_time.real.round(3)}s",
+      "Speedup" => "#{params_speedup.round(2)}x"
+    )
+
+    results << BenchmarkResult.new(
+      :name => "#{size_label} - Reused + reset(:both)",
+      :iterations_per_sec => reused_reset_both_ops_per_sec,
+      "Data size" => Formatter.format_bytes(test_data.bytesize),
+      "Time (#{iterations})" => "#{reused_reset_both_time.real.round(3)}s",
+      "Speedup" => "#{both_speedup.round(2)}x"
     )
   end
 

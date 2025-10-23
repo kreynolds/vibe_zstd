@@ -54,7 +54,7 @@ vibe_zstd_write_skippable_frame(int argc, VALUE *argv, VALUE self) {
     );
 
     if (ZSTD_isError(written)) {
-        rb_raise(rb_eRuntimeError, "ZSTD error: %s", ZSTD_getErrorName(written));
+        rb_raise(rb_eRuntimeError, "Failed to write skippable frame: %s", ZSTD_getErrorName(written));
     }
 
     rb_str_set_len(result, written);
@@ -93,7 +93,7 @@ vibe_zstd_read_skippable_frame(VALUE self, VALUE data) {
     );
 
     if (ZSTD_isError(bytes_read)) {
-        rb_raise(rb_eRuntimeError, "ZSTD error: %s", ZSTD_getErrorName(bytes_read));
+        rb_raise(rb_eRuntimeError, "Failed to read skippable frame: %s", ZSTD_getErrorName(bytes_read));
     }
 
     rb_str_set_len(result, bytes_read);
@@ -115,7 +115,7 @@ vibe_zstd_find_frame_compressed_size(VALUE self, VALUE data) {
     size_t frame_size = ZSTD_findFrameCompressedSize(RSTRING_PTR(data), RSTRING_LEN(data));
 
     if (ZSTD_isError(frame_size)) {
-        rb_raise(rb_eRuntimeError, "ZSTD error: %s", ZSTD_getErrorName(frame_size));
+        rb_raise(rb_eRuntimeError, "Failed to find frame size: %s", ZSTD_getErrorName(frame_size));
     }
 
     return SIZET2NUM(frame_size);

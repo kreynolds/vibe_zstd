@@ -589,6 +589,19 @@ class TestVibeZstd < Minitest::Test
     assert_equal(metadata, results[0][0])
   end
 
+  def test_each_skippable_frame_rejects_malformed_data
+    # Test protection against infinite loop with malformed data
+    # This ensures we don't hang on crafted input that could return zero frame size
+    malformed_data = "\x00" * 100  # Invalid data that doesn't represent valid frames
+
+    # Should raise an error rather than infinite loop
+    assert_raises(StandardError) do
+      VibeZstd.each_skippable_frame(malformed_data) do |content, magic, offset|
+        # Should not reach here
+      end
+    end
+  end
+
   def test_skippable_frame_archive_pattern
     # Simulate a simple archive format
     files = {
@@ -745,5 +758,228 @@ class TestVibeZstd < Minitest::Test
     version_info = "zstd #{VibeZstd.version_string} (#{VibeZstd.version_number})"
 
     assert_match(/zstd \d+\.\d+\.\d+ \(\d+\)/, version_info)
+  end
+
+  # ThreadLocal module tests
+  def test_thread_local_decompress_reuses_context
+    # Clear any existing thread-local contexts
+    VibeZstd::ThreadLocal.clear_thread_cache!
+
+    data = "Test data for thread-local context reuse"
+    compressed = VibeZstd.compress(data)
+
+    # First call should create context
+    result1 = VibeZstd::ThreadLocal.decompress(compressed)
+    assert_equal(data, result1)
+
+    stats1 = VibeZstd::ThreadLocal.thread_cache_stats
+    assert_equal(1, stats1[:decompression_contexts])
+    assert_equal([:default], stats1[:decompression_keys])
+
+    # Second call should reuse same context
+    result2 = VibeZstd::ThreadLocal.decompress(compressed)
+    assert_equal(data, result2)
+
+    stats2 = VibeZstd::ThreadLocal.thread_cache_stats
+    assert_equal(1, stats2[:decompression_contexts]) # Still just one context
+
+    # Clean up
+    VibeZstd::ThreadLocal.clear_thread_cache!
+  end
+
+  def test_thread_local_compress_reuses_context
+    # Clear any existing thread-local contexts
+    VibeZstd::ThreadLocal.clear_thread_cache!
+
+    data = "Test data for thread-local compression context reuse"
+
+    # First call should create context
+    compressed1 = VibeZstd::ThreadLocal.compress(data)
+    assert(compressed1.bytesize > 0)
+
+    stats1 = VibeZstd::ThreadLocal.thread_cache_stats
+    assert_equal(1, stats1[:compression_contexts])
+    assert_equal([:default], stats1[:compression_keys])
+
+    # Second call should reuse same context
+    compressed2 = VibeZstd::ThreadLocal.compress(data)
+    assert_equal(compressed1, compressed2) # Same data should compress identically
+
+    stats2 = VibeZstd::ThreadLocal.thread_cache_stats
+    assert_equal(1, stats2[:compression_contexts]) # Still just one context
+
+    # Clean up
+    VibeZstd::ThreadLocal.clear_thread_cache!
+  end
+
+  def test_thread_local_with_dictionary_isolation
+    # Clear any existing thread-local contexts
+    VibeZstd::ThreadLocal.clear_thread_cache!
+
+    # Create sample data and train dictionaries
+    samples1 = 10.times.map { |i| {id: i, type: "user", name: "User #{i}"}.to_json }
+    samples2 = 10.times.map { |i| {id: i, type: "product", sku: "SKU#{i}"}.to_json }
+
+    dict_data1 = VibeZstd.train_dict(samples1, max_dict_size: 2048)
+    dict_data2 = VibeZstd.train_dict(samples2, max_dict_size: 2048)
+
+    cdict1 = VibeZstd::CDict.new(dict_data1)
+    cdict2 = VibeZstd::CDict.new(dict_data2)
+    ddict1 = VibeZstd::DDict.new(dict_data1)
+    ddict2 = VibeZstd::DDict.new(dict_data2)
+
+    data1 = samples1.first
+    data2 = samples2.first
+
+    # Compress with dict1
+    compressed1 = VibeZstd::ThreadLocal.compress(data1, dict: cdict1)
+
+    stats = VibeZstd::ThreadLocal.thread_cache_stats
+    assert_equal(1, stats[:compression_contexts])
+    assert_includes(stats[:compression_keys], cdict1.dict_id)
+
+    # Compress with dict2 - should create new context
+    compressed2 = VibeZstd::ThreadLocal.compress(data2, dict: cdict2)
+
+    stats = VibeZstd::ThreadLocal.thread_cache_stats
+    assert_equal(2, stats[:compression_contexts]) # Now two contexts
+    assert_includes(stats[:compression_keys], cdict1.dict_id)
+    assert_includes(stats[:compression_keys], cdict2.dict_id)
+
+    # Compress with dict1 again - should reuse first context
+    VibeZstd::ThreadLocal.compress(data1, dict: cdict1)
+
+    stats = VibeZstd::ThreadLocal.thread_cache_stats
+    assert_equal(2, stats[:compression_contexts]) # Still two contexts
+
+    # Verify decompression works correctly
+    assert_equal(data1, VibeZstd::ThreadLocal.decompress(compressed1, dict: ddict1))
+    assert_equal(data2, VibeZstd::ThreadLocal.decompress(compressed2, dict: ddict2))
+
+    # Verify decompression created isolated contexts
+    stats = VibeZstd::ThreadLocal.thread_cache_stats
+    assert_equal(2, stats[:compression_contexts])
+    assert_equal(2, stats[:decompression_contexts])
+
+    # Clean up
+    VibeZstd::ThreadLocal.clear_thread_cache!
+  end
+
+  def test_thread_local_supports_compression_levels
+    # Clear any existing thread-local contexts
+    VibeZstd::ThreadLocal.clear_thread_cache!
+
+    # Use larger, more compressible data to see difference between levels
+    data = "Test data for compression level variation. " * 100
+
+    # Compress with different levels using same context
+    compressed_low = VibeZstd::ThreadLocal.compress(data, level: 1)
+    compressed_high = VibeZstd::ThreadLocal.compress(data, level: 19)
+
+    # Should still use just one context (level is per-operation)
+    stats = VibeZstd::ThreadLocal.thread_cache_stats
+    assert_equal(1, stats[:compression_contexts])
+
+    # Both should decompress correctly
+    assert_equal(data, VibeZstd::ThreadLocal.decompress(compressed_low))
+    assert_equal(data, VibeZstd::ThreadLocal.decompress(compressed_high))
+
+    # Higher compression level should produce smaller output (with larger, repetitive data)
+    assert(compressed_high.bytesize <= compressed_low.bytesize)
+
+    # Clean up
+    VibeZstd::ThreadLocal.clear_thread_cache!
+  end
+
+  def test_thread_local_supports_pledged_size
+    # Clear any existing thread-local contexts
+    VibeZstd::ThreadLocal.clear_thread_cache!
+
+    data = "Test data for pledged_size parameter"
+
+    # Compress with pledged_size
+    compressed = VibeZstd::ThreadLocal.compress(data, pledged_size: data.bytesize)
+    assert(compressed.bytesize > 0)
+
+    # Should decompress correctly
+    decompressed = VibeZstd::ThreadLocal.decompress(compressed)
+    assert_equal(data, decompressed)
+
+    # Clean up
+    VibeZstd::ThreadLocal.clear_thread_cache!
+  end
+
+  def test_thread_local_supports_initial_capacity
+    # Clear any existing thread-local contexts
+    VibeZstd::ThreadLocal.clear_thread_cache!
+
+    data = "Test data for initial_capacity parameter"
+    compressed = VibeZstd.compress(data)
+
+    # Decompress with custom initial_capacity
+    decompressed = VibeZstd::ThreadLocal.decompress(compressed, initial_capacity: 4096)
+    assert_equal(data, decompressed)
+
+    # Clean up
+    VibeZstd::ThreadLocal.clear_thread_cache!
+  end
+
+  def test_thread_local_clear_thread_cache
+    # Clear any existing thread-local contexts
+    VibeZstd::ThreadLocal.clear_thread_cache!
+
+    data = "Test data"
+    compressed = VibeZstd.compress(data)
+
+    # Create some contexts
+    VibeZstd::ThreadLocal.compress(data)
+    VibeZstd::ThreadLocal.decompress(compressed)
+
+    stats = VibeZstd::ThreadLocal.thread_cache_stats
+    assert_equal(1, stats[:compression_contexts])
+    assert_equal(1, stats[:decompression_contexts])
+
+    # Clear cache
+    VibeZstd::ThreadLocal.clear_thread_cache!
+
+    # Should have no contexts now
+    stats = VibeZstd::ThreadLocal.thread_cache_stats
+    assert_equal(0, stats[:compression_contexts])
+    assert_equal(0, stats[:decompression_contexts])
+  end
+
+  def test_thread_local_isolation_between_threads
+    # Clear any existing thread-local contexts
+    VibeZstd::ThreadLocal.clear_thread_cache!
+
+    data = "Test thread isolation"
+    compressed = VibeZstd.compress(data)
+
+    # Use ThreadLocal in main thread
+    VibeZstd::ThreadLocal.decompress(compressed)
+    main_stats = VibeZstd::ThreadLocal.thread_cache_stats
+    assert_equal(1, main_stats[:decompression_contexts])
+
+    # Create another thread
+    thread_stats = nil
+    Thread.new do
+      # This thread should have its own empty cache
+      stats_before = VibeZstd::ThreadLocal.thread_cache_stats
+      assert_equal(0, stats_before[:decompression_contexts])
+
+      # Create context in this thread
+      VibeZstd::ThreadLocal.decompress(compressed)
+      thread_stats = VibeZstd::ThreadLocal.thread_cache_stats
+    end.join
+
+    # New thread should have created its own context
+    assert_equal(1, thread_stats[:decompression_contexts])
+
+    # Main thread should still have just one context
+    main_stats_after = VibeZstd::ThreadLocal.thread_cache_stats
+    assert_equal(1, main_stats_after[:decompression_contexts])
+
+    # Clean up
+    VibeZstd::ThreadLocal.clear_thread_cache!
   end
 end
