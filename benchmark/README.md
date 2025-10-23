@@ -125,22 +125,21 @@ ruby benchmark/dictionary_training.rb
 **What it tests:** Performance impact of using multiple worker threads for compression.
 
 **Key findings:**
-- Multi-threading provides **1.5-3x speedup** for large data
-- Only helps with data **> 256KB** (overhead for smaller)
-- Optimal: **2-4 workers** (diminishing returns after)
+- Multi-threading benefits vary significantly based on file size, data characteristics, and compression settings
+- Smaller files (< few MB) typically don't benefit due to overhead
+- Performance improvements depend heavily on data compressibility
 - More workers = higher memory usage
-
-**Typical speedups:**
-- 2 workers: 1.5-1.8x faster
-- 4 workers: 2.0-2.5x faster
-- 8 workers: 2.2-3.0x faster
+- Optimal thread count is typically 2-4 workers
 
 **When to use:**
-- ✓ Large files (> 256KB)
-- ✓ High-throughput scenarios
-- ✓ When CPU is available
-- ✗ Small data (< 256KB)
-- ✗ Memory-constrained environments
+- ✓ Large files where compression is a bottleneck
+- ✓ When you've benchmarked your specific use case and confirmed benefits
+- ✓ Higher compression levels (where compression work is more substantial)
+- ✗ Small files (generally < few MB)
+- ✗ Without benchmarking your specific workload
+- ✗ When memory usage is a concern
+
+**Recommendation:** Always benchmark with your actual data. Multi-threading overhead can outweigh benefits for many workloads. See the [official zstd documentation](https://facebook.github.io/zstd/zstd_manual.html) for detailed guidance.
 
 ### 6. Dictionary Training (`dictionary_training.rb`)
 

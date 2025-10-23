@@ -8,7 +8,7 @@ require_relative "helpers"
 
 BenchmarkHelpers.run_comparison(title: "Multi-threaded Compression Performance") do |results|
   # Generate large test data (multi-threading only helps with larger data)
-  large_data = DataGenerator.mixed_data(size: 500_000)
+  large_data = DataGenerator.mixed_data(size: 5_000_000)
   puts "Test data size: #{Formatter.format_bytes(large_data.bytesize)}"
   puts "CPU cores available: #{begin
     `sysctl -n hw.ncpu`.strip
@@ -23,7 +23,7 @@ BenchmarkHelpers.run_comparison(title: "Multi-threaded Compression Performance")
     Formatter.section("Testing: #{workers} worker#{(workers == 1) ? "" : "s"} #{(workers == 0) ? "(single-threaded)" : ""}")
 
     cctx = VibeZstd::CCtx.new
-    cctx.nb_workers = workers if workers > 0
+    cctx.workers = workers if workers > 0
 
     # Warm up
     cctx.compress(large_data)
@@ -74,7 +74,7 @@ BenchmarkHelpers.run_comparison(title: "Multi-threaded Compression Performance")
 
   job_sizes.each do |job_size|
     cctx = VibeZstd::CCtx.new
-    cctx.nb_workers = 4
+    cctx.workers = 4
     cctx.job_size = job_size
 
     time = Benchmark.measure do
@@ -95,11 +95,10 @@ BenchmarkHelpers.run_comparison(title: "Multi-threaded Compression Performance")
 end
 
 puts "\n💡 Multi-threading Recommendations:"
-puts "  ✓ Use for data > 256KB (overhead not worth it for smaller data)"
-puts "  ✓ Optimal workers: 2-4 for most use cases (diminishing returns after)"
+puts "  ✓ Generally only beneficial for large files (multiple MB or larger)"
+puts "  ✓ Start with 2-4 workers and benchmark your specific use case"
+puts "  ✓ Performance benefits vary greatly by data type and compression level"
 puts "  ✓ More workers = higher memory usage"
-puts "  ✓ job_size affects compression ratio vs parallelism tradeoff"
-puts "\n  Typical speedups:"
-puts "    - 2 workers: 1.5-1.8x faster"
-puts "    - 4 workers: 2.0-2.5x faster"
-puts "    - 8 workers: 2.2-3.0x faster (diminishing returns)"
+puts "  ✗ May show no improvement or even slowdown for many workloads"
+puts "\n  Always benchmark with your actual data before enabling in production."
+puts "  See: https://facebook.github.io/zstd/zstd_manual.html"

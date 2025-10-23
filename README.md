@@ -384,7 +384,7 @@ reader.eof?  # => true/false
 
 ### Multi-threaded Compression
 
-Enable parallel compression for large data:
+Enable parallel compression for large files:
 
 ```ruby
 cctx = VibeZstd::CCtx.new
@@ -399,15 +399,21 @@ large_data = File.read('big_file.txt')
 compressed = cctx.compress(large_data)
 ```
 
-**Multi-threading performance** (500KB data):
+**When to use multi-threading:**
 
-| Workers | Throughput | Speedup | Efficiency |
-|---------|------------|---------|------------|
-| 0 (single) | 795MB/s | 1.0x | 100% |
-| 2 | 784MB/s | 0.99x | 49% |
-| 4 | 748MB/s | 0.94x | 24% |
+Multi-threading can improve compression speed for large files, but benefits vary significantly based on:
+- File size (generally only beneficial for larger files)
+- Data compressibility (less compressible data sees better improvements)
+- Compression level (higher levels may benefit more)
+- Available CPU cores and system load
 
-**Note:** Multi-threading works best for data > 1MB. Overhead may outweigh benefits for smaller payloads.
+**Recommendations:**
+- Start with 2-4 worker threads for large files
+- Files smaller than a few MB typically won't benefit
+- Always benchmark with your specific data and use case
+- Consider that more threads increase memory usage
+
+See the [official zstd documentation](https://facebook.github.io/zstd/zstd_manual.html) for detailed performance characteristics.
 
 #### Multi-threading Tuning
 

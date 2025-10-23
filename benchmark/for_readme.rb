@@ -4,6 +4,7 @@
 # Quick benchmark script to generate results for README
 
 require_relative "helpers"
+include BenchmarkHelpers
 
 puts "# Performance Benchmarks\n\n"
 puts "Results from Ruby #{RUBY_VERSION} on #{RUBY_PLATFORM}, Zstd #{VibeZstd.version_string}\n\n"
@@ -123,9 +124,9 @@ puts "\n"
 
 # 4. Multi-threading
 puts "## Multi-threading Performance\n\n"
-puts "Compression speedup with multiple workers (500KB data):\n\n"
+puts "Compression speedup with multiple workers (20MB data, level 9):\n\n"
 
-mt_data = DataGenerator.mixed_data(size: 500_000)
+mt_data = DataGenerator.mixed_data(size: 20_000_000)
 
 puts "| Workers | Throughput | Speedup | Efficiency |"
 puts "|---------|------------|---------|------------|"
@@ -133,16 +134,20 @@ puts "|---------|------------|---------|------------|"
 baseline_throughput = nil
 
 [0, 2, 4].each do |workers|
-  cctx = VibeZstd::CCtx.new
-  cctx.nb_workers = workers if workers > 0
+  cctx = VibeZstd::CCtx.new(compression_level: 9)
+  cctx.workers = workers if workers > 0
+  cctx.job_size = 5_000_000 if workers > 0  # Set job size for better parallelism
+
+  # Debug: verify workers are set correctly
+  puts "DEBUG: Requested #{workers} workers, actual: #{cctx.workers}" if ENV['DEBUG']
 
   cctx.compress(mt_data) # warmup
 
   time = Benchmark.measure do
-    5.times { cctx.compress(mt_data) }
+    3.times { cctx.compress(mt_data) }
   end
 
-  throughput = (mt_data.bytesize * 5 / time.real)
+  throughput = (mt_data.bytesize * 3 / time.real)
 
   if workers == 0
     baseline_throughput = throughput
@@ -154,4 +159,4 @@ baseline_throughput = nil
   end
 end
 
-puts "\n**Note:** Multi-threading is most effective for data > 256KB. Diminishing returns after 4 workers.\n"
+puts "\n**Note:** Multi-threading is most effective for large files. Performance benefits vary based on data characteristics, compression level, and system resources. Always benchmark your specific use case.\n"
