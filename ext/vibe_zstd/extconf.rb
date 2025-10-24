@@ -27,11 +27,11 @@ have_library("pthread") || abort("pthread library is required for multithreading
 # selectively, or entirely remove this flag.
 append_cflags("-fvisibility=hidden")
 
-# Gather all vendored zstd source files
+# Gather all vendored zstd source files (including assembly with arch guards)
 zstd_sources = Dir[
   "#{LIBZSTD_DIR}/common/*.c",
   "#{LIBZSTD_DIR}/compress/*.c",
-  "#{LIBZSTD_DIR}/decompress/*.c",
+  "#{LIBZSTD_DIR}/decompress/*.{c,S}",
   "#{LIBZSTD_DIR}/dictBuilder/*.c",
   "#{LIBZSTD_DIR}/deprecated/*.c"
 ].map { |path| File.basename(path) }

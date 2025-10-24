@@ -4,7 +4,6 @@
 # Quick benchmark script to generate results for README
 
 require_relative "helpers"
-include BenchmarkHelpers
 
 puts "# Performance Benchmarks\n\n"
 puts "Results from Ruby #{RUBY_VERSION} on #{RUBY_PLATFORM}, Zstd #{VibeZstd.version_string}\n\n"
@@ -15,9 +14,9 @@ puts "Reusing compression/decompression contexts vs creating new ones (5000 iter
 
 # Test with different data sizes
 test_cases = {
-  "1KB" => DataGenerator.json_data(count: 5),
-  "10KB" => DataGenerator.json_data(count: 50),
-  "100KB" => DataGenerator.json_data(count: 500)
+  "1KB" => BenchmarkHelpers::DataGenerator.json_data(count: 5),
+  "10KB" => BenchmarkHelpers::DataGenerator.json_data(count: 50),
+  "100KB" => BenchmarkHelpers::DataGenerator.json_data(count: 500)
 }
 
 puts "| Data Size | New Context | Reused Context | Speedup |"
@@ -48,14 +47,14 @@ test_cases.each do |size_label, test_data|
   reused_ops = iterations / reused_time.real
   speedup = reused_ops / new_ops
 
-  puts "| #{size_label} | #{Formatter.format_number(new_ops.to_i)} ops/s | #{Formatter.format_number(reused_ops.to_i)} ops/s | #{speedup.round(2)}x |"
+  puts "| #{size_label} | #{BenchmarkHelpers::Formatter.format_number(new_ops.to_i)} ops/s | #{BenchmarkHelpers::Formatter.format_number(reused_ops.to_i)} ops/s | #{speedup.round(2)}x |"
 end
 
-cctx_mem = Memory.estimate_cctx(3)
-dctx_mem = Memory.estimate_dctx
+cctx_mem = BenchmarkHelpers::Memory.estimate_cctx(3)
+dctx_mem = BenchmarkHelpers::Memory.estimate_dctx
 total_mem = cctx_mem + dctx_mem
 
-puts "\n**Memory savings:** Reusing contexts saves #{Formatter.format_bytes(total_mem * 4999)} for 5000 operations (99.98% reduction)\n"
+puts "\n**Memory savings:** Reusing contexts saves #{BenchmarkHelpers::Formatter.format_bytes(total_mem * 4999)} for 5000 operations (99.98% reduction)\n"
 puts "**Recommendation:** Always reuse CCtx/DCtx instances for multiple operations.\n\n"
 
 # 2. Dictionary Performance
@@ -91,7 +90,7 @@ puts "\nOriginal size: #{test_sample.bytesize} bytes\n\n"
 puts "## Compression Levels\n\n"
 puts "Speed vs compression ratio trade-offs:\n\n"
 
-large_data = DataGenerator.mixed_data(size: 50_000)
+large_data = BenchmarkHelpers::DataGenerator.mixed_data(size: 50_000)
 levels = [-1, 1, 3, 9, 19]
 
 puts "| Level | Ratio | Speed (ops/sec) | Memory | Use Case |"
@@ -107,7 +106,7 @@ levels.each do |level|
 
   ops_per_sec = 10 / time.real
   ratio = large_data.bytesize.to_f / compressed.bytesize
-  memory = Memory.estimate_cctx(level)
+  memory = BenchmarkHelpers::Memory.estimate_cctx(level)
 
   use_case = case level
   when -1 then "Ultra-fast, real-time"
@@ -117,7 +116,7 @@ levels.each do |level|
   when 19 then "Maximum compression"
   end
 
-  puts "| #{level} | #{ratio.round(2)}x | #{Formatter.format_number(ops_per_sec.to_i)} | #{Formatter.format_bytes(memory)} | #{use_case} |"
+  puts "| #{level} | #{ratio.round(2)}x | #{BenchmarkHelpers::Formatter.format_number(ops_per_sec.to_i)} | #{BenchmarkHelpers::Formatter.format_bytes(memory)} | #{use_case} |"
 end
 
 puts "\n"
@@ -126,7 +125,7 @@ puts "\n"
 puts "## Multi-threading Performance\n\n"
 puts "Compression speedup with multiple workers (20MB data, level 9):\n\n"
 
-mt_data = DataGenerator.mixed_data(size: 20_000_000)
+mt_data = BenchmarkHelpers::DataGenerator.mixed_data(size: 20_000_000)
 
 puts "| Workers | Throughput | Speedup | Efficiency |"
 puts "|---------|------------|---------|------------|"
@@ -139,7 +138,7 @@ baseline_throughput = nil
   cctx.job_size = 5_000_000 if workers > 0  # Set job size for better parallelism
 
   # Debug: verify workers are set correctly
-  puts "DEBUG: Requested #{workers} workers, actual: #{cctx.workers}" if ENV['DEBUG']
+  puts "DEBUG: Requested #{workers} workers, actual: #{cctx.workers}" if ENV["DEBUG"]
 
   cctx.compress(mt_data) # warmup
 
@@ -151,11 +150,11 @@ baseline_throughput = nil
 
   if workers == 0
     baseline_throughput = throughput
-    puts "| #{workers} (single) | #{Formatter.format_bytes(throughput.to_i)}/s | 1.0x | 100% |"
+    puts "| #{workers} (single) | #{BenchmarkHelpers::Formatter.format_bytes(throughput.to_i)}/s | 1.0x | 100% |"
   else
     speedup = throughput / baseline_throughput
     efficiency = (speedup / workers * 100).round(0)
-    puts "| #{workers} | #{Formatter.format_bytes(throughput.to_i)}/s | #{speedup.round(2)}x | #{efficiency}% |"
+    puts "| #{workers} | #{BenchmarkHelpers::Formatter.format_bytes(throughput.to_i)}/s | #{speedup.round(2)}x | #{efficiency}% |"
   end
 end
 
