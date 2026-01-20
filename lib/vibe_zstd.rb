@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "vibe_zstd/version"
-require_relative "vibe_zstd/vibe_zstd"
+require "vibe_zstd/vibe_zstd"
 require_relative "vibe_zstd/constants"
 
 module VibeZstd
