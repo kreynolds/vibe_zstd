@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
-require_relative "vibe_zstd/version"
-require "vibe_zstd/vibe_zstd"
-require_relative "vibe_zstd/constants"
+require_relative 'vibe_zstd/version'
+require 'vibe_zstd/vibe_zstd'
+require_relative 'vibe_zstd/constants'
 
 module VibeZstd
   class Error < StandardError; end
@@ -39,9 +39,7 @@ module VibeZstd
 
       # Defense: Prevent infinite loop on malformed data
       # A valid frame must have non-zero size (at minimum: frame header)
-      if frame_size <= 0
-        raise Error, "Invalid frame: zero or negative size at offset #{offset}"
-      end
+      raise Error, "Invalid frame: zero or negative size at offset #{offset}" if frame_size <= 0
 
       if skippable_frame?(frame_data)
         content, magic_variant = read_skippable_frame(frame_data)
@@ -54,9 +52,9 @@ module VibeZstd
 
   # Convenient aliases for version/level methods
   class << self
-    alias_method :min_level, :min_compression_level
-    alias_method :max_level, :max_compression_level
-    alias_method :default_level, :default_compression_level
+    alias min_level min_compression_level
+    alias max_level max_compression_level
+    alias default_level default_compression_level
   end
 
   # Add helper method to CDict for creating matching DDict
@@ -68,7 +66,7 @@ module VibeZstd
     def to_ddict
       @ddict ||= DDict.new(@dict_data)
     end
-    alias_method :ddict, :to_ddict
+    alias ddict to_ddict
   end
 
   # Thread-local context pooling for high-performance reuse
@@ -191,8 +189,14 @@ module VibeZstd
     end
 
     # Read all remaining data
+    # Drains any buffered data from line_buffer first
     def read_all
       chunks = []
+      # Drain line buffer first if present
+      if @line_buffer && !@line_buffer.empty?
+        chunks << @line_buffer
+        @line_buffer = +''
+      end
       while (chunk = read)
         chunks << chunk
       end
@@ -214,20 +218,29 @@ module VibeZstd
       end
     end
 
-    # Read a single line (up to newline or EOF)
+    # Read a single line (up to separator or EOF)
+    # Uses buffered reads (8192 bytes) instead of byte-at-a-time for performance.
+    # Orders of magnitude faster for line-oriented reading.
     def gets(sep = $/)
-      return nil if eof?
+      return nil if eof? && (@line_buffer.nil? || @line_buffer.empty?)
 
-      line = +""
-      until eof?
-        chunk = read(1)
+      @line_buffer ||= +''
+
+      loop do
+        # Check buffer for separator
+        if (idx = @line_buffer.index(sep))
+          return @line_buffer.slice!(0, idx + sep.bytesize)
+        end
+
+        # Read more data in larger chunks
+        chunk = read(8192)
         break unless chunk
 
-        line << chunk
-        break if chunk.end_with?(sep)
+        @line_buffer << chunk
       end
 
-      line.empty? ? nil : line
+      # Return remaining buffer or nil
+      @line_buffer.empty? ? nil : @line_buffer.slice!(0, @line_buffer.bytesize)
     end
 
     # Iterate over lines
@@ -240,14 +253,14 @@ module VibeZstd
     end
 
     # Alias for gets
-    alias_method :readline, :gets
+    alias readline gets
 
     # Read exactly n bytes, or raise EOFError
     def readpartial(maxlen)
-      raise EOFError, "end of file reached" if eof?
+      raise EOFError, 'end of file reached' if eof?
 
       data = read(maxlen)
-      raise EOFError, "end of file reached" if data.nil?
+      raise EOFError, 'end of file reached' if data.nil?
 
       data
     end
