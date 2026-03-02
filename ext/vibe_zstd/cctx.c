@@ -9,14 +9,12 @@ static int
 vibe_zstd_cctx_init_param_iter(VALUE key, VALUE value, VALUE self) {
     // Build the setter method name: key + "="
     const char* key_str = rb_id2name(SYM2ID(key));
-    size_t setter_len = strlen(key_str) + 2;  // +1 for '=' + 1 for '\0'
-    char* setter = ALLOC_N(char, setter_len);
-    snprintf(setter, setter_len, "%s=", key_str);
+    char setter[256];
+    snprintf(setter, sizeof(setter), "%s=", key_str);
 
     // Call the setter method
     rb_funcall(self, rb_intern(setter), 1, value);
 
-    xfree(setter);
     return ST_CONTINUE;
 }
 
@@ -193,25 +191,36 @@ static cctx_param_entry cctx_param_table[] = {
 
 #define CCTX_PARAM_TABLE_SIZE (sizeof(cctx_param_table) / sizeof(cctx_param_entry))
 
-// Initialize parameter lookup table symbol IDs
+// Comparator for sorting and searching the parameter table by symbol_id
+static int
+cctx_param_compare(const void *a, const void *b) {
+    const cctx_param_entry *ea = a, *eb = b;
+    if (ea->symbol_id < eb->symbol_id) return -1;
+    if (ea->symbol_id > eb->symbol_id) return 1;
+    return 0;
+}
+
+// Initialize parameter lookup table symbol IDs and sort for binary search
 static void
 init_cctx_param_table(void) {
     for (size_t i = 0; i < CCTX_PARAM_TABLE_SIZE; i++) {
         cctx_param_table[i].symbol_id = rb_intern(cctx_param_table[i].name);
     }
+    qsort(cctx_param_table, CCTX_PARAM_TABLE_SIZE, sizeof(cctx_param_entry), cctx_param_compare);
 }
 
-// Helper: look up parameter enum from symbol ID
+// Helper: look up parameter enum from symbol ID using binary search
 // Maps Ruby symbol (e.g., :compression_level) to ZSTD parameter constant
 // Returns 1 if found, 0 if unknown parameter
 static int
 lookup_cctx_param(ID symbol_id, ZSTD_cParameter* param_out, const char** name_out) {
-    for (size_t i = 0; i < CCTX_PARAM_TABLE_SIZE; i++) {
-        if (cctx_param_table[i].symbol_id == symbol_id) {
-            *param_out = cctx_param_table[i].param;
-            if (name_out) *name_out = cctx_param_table[i].name;
-            return 1;
-        }
+    cctx_param_entry key = { .symbol_id = symbol_id };
+    cctx_param_entry *found = bsearch(&key, cctx_param_table, CCTX_PARAM_TABLE_SIZE,
+                                       sizeof(cctx_param_entry), cctx_param_compare);
+    if (found) {
+        *param_out = found->param;
+        if (name_out) *name_out = found->name;
+        return 1;
     }
     return 0;
 }
