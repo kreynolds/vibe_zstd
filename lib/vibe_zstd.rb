@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
-require_relative 'vibe_zstd/version'
-require 'vibe_zstd/vibe_zstd'
-require_relative 'vibe_zstd/constants'
+require_relative "vibe_zstd/version"
+require "vibe_zstd/vibe_zstd"
+require_relative "vibe_zstd/constants"
 
 module VibeZstd
   class Error < StandardError; end
@@ -52,9 +52,9 @@ module VibeZstd
 
   # Convenient aliases for version/level methods
   class << self
-    alias min_level min_compression_level
-    alias max_level max_compression_level
-    alias default_level default_compression_level
+    alias_method :min_level, :min_compression_level
+    alias_method :max_level, :max_compression_level
+    alias_method :default_level, :default_compression_level
   end
 
   # Add helper method to CDict for creating matching DDict
@@ -66,7 +66,7 @@ module VibeZstd
     def to_ddict
       @ddict ||= DDict.new(@dict_data)
     end
-    alias ddict to_ddict
+    alias_method :ddict, :to_ddict
   end
 
   # Thread-local context pooling for high-performance reuse
@@ -195,7 +195,7 @@ module VibeZstd
       # Drain line buffer first if present
       if @line_buffer && !@line_buffer.empty?
         chunks << @line_buffer
-        @line_buffer = +''
+        @line_buffer = +""
       end
       while (chunk = read)
         chunks << chunk
@@ -224,7 +224,7 @@ module VibeZstd
     def gets(sep = $/)
       return nil if eof? && (@line_buffer.nil? || @line_buffer.empty?)
 
-      @line_buffer ||= +''
+      @line_buffer ||= +""
 
       loop do
         # Check buffer for separator
@@ -253,14 +253,14 @@ module VibeZstd
     end
 
     # Alias for gets
-    alias readline gets
+    alias_method :readline, :gets
 
     # Read exactly n bytes, or raise EOFError
     def readpartial(maxlen)
-      raise EOFError, 'end of file reached' if eof?
+      raise EOFError, "end of file reached" if eof?
 
       data = read(maxlen)
-      raise EOFError, 'end of file reached' if data.nil?
+      raise EOFError, "end of file reached" if data.nil?
 
       data
     end
