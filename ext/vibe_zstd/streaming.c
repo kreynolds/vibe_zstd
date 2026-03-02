@@ -1,6 +1,10 @@
 // Streaming implementation for VibeZstd
 #include "vibe_zstd_internal.h"
 
+// Cached method IDs for frequently called methods
+static ID id_write;
+static ID id_read;
+
 // Forward declarations
 static VALUE vibe_zstd_writer_initialize(int argc, VALUE *argv, VALUE self);
 static VALUE vibe_zstd_writer_write(VALUE self, VALUE data);
@@ -25,12 +29,12 @@ vibe_zstd_writer_initialize(int argc, VALUE *argv, VALUE self) {
     TypedData_Get_Struct(self, vibe_zstd_cstream, &vibe_zstd_cstream_type, cstream);
 
     // Validate IO object responds to write (duck typing)
-    if (!rb_respond_to(io, rb_intern("write"))) {
+    if (!rb_respond_to(io, id_write)) {
         rb_raise(rb_eTypeError, "IO object must respond to write");
     }
 
-    // Store IO object
-    cstream->io = io;
+    // Store IO object (write barrier for WB_PROTECTED)
+    RB_OBJ_WRITE(self, &cstream->io, io);
     rb_ivar_set(self, rb_intern("@io"), io);
 
     // Parse options
@@ -87,6 +91,9 @@ vibe_zstd_writer_initialize(int argc, VALUE *argv, VALUE self) {
         }
     }
 
+    // Allocate reusable output buffer (write barrier for WB_PROTECTED)
+    RB_OBJ_WRITE(self, &cstream->output_buffer, rb_str_buf_new(ZSTD_CStreamOutSize()));
+
     return self;
 }
 
@@ -105,10 +112,11 @@ vibe_zstd_writer_write(VALUE self, VALUE data) {
     };
 
     size_t outBufferSize = ZSTD_CStreamOutSize();
-    VALUE outBuffer = rb_str_buf_new(outBufferSize);
+    VALUE outBuffer = cstream->output_buffer;
 
     // Process all input data in chunks
     while (input.pos < input.size) {
+        rb_str_set_len(outBuffer, 0);  // Reset buffer for reuse
         ZSTD_outBuffer output = {
             .dst = RSTRING_PTR(outBuffer),
             .size = outBufferSize,
@@ -125,8 +133,7 @@ vibe_zstd_writer_write(VALUE self, VALUE data) {
         // Write any compressed output that was produced
         if (output.pos > 0) {
             rb_str_set_len(outBuffer, output.pos);
-            rb_funcall(cstream->io, rb_intern("write"), 1, outBuffer);
-            // No need to resize - buffer capacity remains at outBufferSize
+            rb_funcall(cstream->io, id_write, 1, outBuffer);
         }
     }
 
@@ -139,7 +146,7 @@ vibe_zstd_writer_flush(VALUE self) {
     TypedData_Get_Struct(self, vibe_zstd_cstream, &vibe_zstd_cstream_type, cstream);
 
     size_t outBufferSize = ZSTD_CStreamOutSize();
-    VALUE outBuffer = rb_str_buf_new(outBufferSize);
+    VALUE outBuffer = cstream->output_buffer;
 
     ZSTD_inBuffer input = { NULL, 0, 0 };
     size_t remaining;
@@ -147,6 +154,7 @@ vibe_zstd_writer_flush(VALUE self) {
     // ZSTD_e_flush: flush internal buffers, making all data readable
     // Loop until remaining == 0 (flush complete)
     do {
+        rb_str_set_len(outBuffer, 0);  // Reset buffer for reuse
         ZSTD_outBuffer output = {
             .dst = RSTRING_PTR(outBuffer),
             .size = outBufferSize,
@@ -161,8 +169,7 @@ vibe_zstd_writer_flush(VALUE self) {
 
         if (output.pos > 0) {
             rb_str_set_len(outBuffer, output.pos);
-            rb_funcall(cstream->io, rb_intern("write"), 1, outBuffer);
-            // No need to resize - buffer capacity remains at outBufferSize
+            rb_funcall(cstream->io, id_write, 1, outBuffer);
         }
     } while (remaining > 0);
 
@@ -175,7 +182,7 @@ vibe_zstd_writer_finish(VALUE self) {
     TypedData_Get_Struct(self, vibe_zstd_cstream, &vibe_zstd_cstream_type, cstream);
 
     size_t outBufferSize = ZSTD_CStreamOutSize();
-    VALUE outBuffer = rb_str_buf_new(outBufferSize);
+    VALUE outBuffer = cstream->output_buffer;
 
     ZSTD_inBuffer input = { NULL, 0, 0 };
     size_t remaining;
@@ -183,6 +190,7 @@ vibe_zstd_writer_finish(VALUE self) {
     // ZSTD_e_end: finalize frame with checksum and epilogue
     // Loop until remaining == 0 (frame complete)
     do {
+        rb_str_set_len(outBuffer, 0);  // Reset buffer for reuse
         ZSTD_outBuffer output = {
             .dst = RSTRING_PTR(outBuffer),
             .size = outBufferSize,
@@ -197,8 +205,7 @@ vibe_zstd_writer_finish(VALUE self) {
 
         if (output.pos > 0) {
             rb_str_set_len(outBuffer, output.pos);
-            rb_funcall(cstream->io, rb_intern("write"), 1, outBuffer);
-            // No need to resize - buffer capacity remains at outBufferSize
+            rb_funcall(cstream->io, id_write, 1, outBuffer);
         }
     } while (remaining > 0);
 
@@ -216,12 +223,12 @@ vibe_zstd_reader_initialize(int argc, VALUE *argv, VALUE self) {
     TypedData_Get_Struct(self, vibe_zstd_dstream, &vibe_zstd_dstream_type, dstream);
 
     // Validate IO object responds to read (duck typing)
-    if (!rb_respond_to(io, rb_intern("read"))) {
+    if (!rb_respond_to(io, id_read)) {
         rb_raise(rb_eTypeError, "IO object must respond to read");
     }
 
-    // Store IO object
-    dstream->io = io;
+    // Store IO object (write barrier for WB_PROTECTED)
+    RB_OBJ_WRITE(self, &dstream->io, io);
     rb_ivar_set(self, rb_intern("@io"), io);
 
     // Parse options
@@ -263,7 +270,7 @@ vibe_zstd_reader_initialize(int argc, VALUE *argv, VALUE self) {
     }
 
     // Initialize input buffer management
-    dstream->input_data = rb_str_new(NULL, 0);
+    RB_OBJ_WRITE(self, &dstream->input_data, rb_str_new(NULL, 0));
     dstream->input.src = NULL;
     dstream->input.size = 0;
     dstream->input.pos = 0;
@@ -317,7 +324,7 @@ vibe_zstd_reader_read(int argc, VALUE *argv, VALUE self) {
     while (total_read < requested_size) {
         // Refill input buffer when all compressed data consumed
         if (dstream->input.pos >= dstream->input.size) {
-            VALUE chunk = rb_funcall(dstream->io, rb_intern("read"), 1, SIZET2NUM(inBufferSize));
+            VALUE chunk = rb_funcall(dstream->io, id_read, 1, SIZET2NUM(inBufferSize));
             if (NIL_P(chunk)) {
                 dstream->eof = 1;
                 if (total_read == 0 && !made_progress) {
@@ -326,8 +333,8 @@ vibe_zstd_reader_read(int argc, VALUE *argv, VALUE self) {
                 break;
             }
 
-            // Reset input buffer with new data
-            dstream->input_data = chunk;
+            // Reset input buffer with new data (write barrier for WB_PROTECTED)
+            RB_OBJ_WRITE(self, &dstream->input_data, chunk);
             dstream->input.src = RSTRING_PTR(chunk);
             dstream->input.size = RSTRING_LEN(chunk);
             dstream->input.pos = 0;
@@ -394,6 +401,10 @@ vibe_zstd_reader_eof(VALUE self) {
 // Class initialization function called from main Init_vibe_zstd
 void
 vibe_zstd_streaming_init_classes(VALUE rb_cVibeZstdCompressWriter, VALUE rb_cVibeZstdDecompressReader) {
+    // Cache method IDs for frequently called methods
+    id_write = rb_intern("write");
+    id_read = rb_intern("read");
+
     // CompressWriter setup
     rb_define_alloc_func(rb_cVibeZstdCompressWriter, vibe_zstd_cstream_alloc);
     rb_define_method(rb_cVibeZstdCompressWriter, "initialize", vibe_zstd_writer_initialize, -1);

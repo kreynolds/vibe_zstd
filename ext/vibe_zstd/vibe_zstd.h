@@ -26,6 +26,7 @@ typedef struct {
 typedef struct {
     ZSTD_CStream* cstream;
     VALUE io;
+    VALUE output_buffer;  // Reusable output buffer to avoid ~128KB allocation per write/flush/finish
 } vibe_zstd_cstream;
 
 typedef struct {
