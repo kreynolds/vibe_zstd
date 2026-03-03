@@ -12,7 +12,7 @@ VALUE rb_cVibeZstdDDict;
 VALUE rb_cVibeZstdCompressWriter;
 VALUE rb_cVibeZstdDecompressReader;
 
-// Forward declarations for free and mark functions
+// Forward declarations for free, mark, and dsize functions
 static void vibe_zstd_cctx_free(void* ptr);
 static void vibe_zstd_dctx_free(void* ptr);
 static void vibe_zstd_cdict_free(void* ptr);
@@ -22,16 +22,47 @@ static void vibe_zstd_cstream_mark(void* ptr);
 static void vibe_zstd_dstream_free(void* ptr);
 static void vibe_zstd_dstream_mark(void* ptr);
 
+// dsize callbacks - report memory usage to Ruby GC for accurate memory pressure tracking
+static size_t vibe_zstd_cctx_dsize(const void* ptr) {
+    const vibe_zstd_cctx* cctx = ptr;
+    return sizeof(vibe_zstd_cctx) + (cctx->cctx ? ZSTD_sizeof_CCtx(cctx->cctx) : 0);
+}
+
+static size_t vibe_zstd_dctx_dsize(const void* ptr) {
+    const vibe_zstd_dctx* dctx = ptr;
+    return sizeof(vibe_zstd_dctx) + (dctx->dctx ? ZSTD_sizeof_DCtx(dctx->dctx) : 0);
+}
+
+static size_t vibe_zstd_cdict_dsize(const void* ptr) {
+    const vibe_zstd_cdict* cdict = ptr;
+    return sizeof(vibe_zstd_cdict) + (cdict->cdict ? ZSTD_sizeof_CDict(cdict->cdict) : 0);
+}
+
+static size_t vibe_zstd_ddict_dsize(const void* ptr) {
+    const vibe_zstd_ddict* ddict = ptr;
+    return sizeof(vibe_zstd_ddict) + (ddict->ddict ? ZSTD_sizeof_DDict(ddict->ddict) : 0);
+}
+
+static size_t vibe_zstd_cstream_dsize(const void* ptr) {
+    const vibe_zstd_cstream* cstream = ptr;
+    return sizeof(vibe_zstd_cstream) + (cstream->cstream ? ZSTD_sizeof_CStream(cstream->cstream) : 0);
+}
+
+static size_t vibe_zstd_dstream_dsize(const void* ptr) {
+    const vibe_zstd_dstream* dstream = ptr;
+    return sizeof(vibe_zstd_dstream) + (dstream->dstream ? ZSTD_sizeof_DStream(dstream->dstream) : 0);
+}
+
 // TypedData type definitions (these are referenced by extern in the split files)
 rb_data_type_t vibe_zstd_cctx_type = {
     .wrap_struct_name = "vibe_zstd_cctx",
     .function = {
         .dmark = NULL,
         .dfree = (RUBY_DATA_FUNC)vibe_zstd_cctx_free,
-        .dsize = NULL,
+        .dsize = vibe_zstd_cctx_dsize,
     },
     .data = NULL,
-    .flags = RUBY_TYPED_FREE_IMMEDIATELY,
+    .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED,
 };
 
 rb_data_type_t vibe_zstd_dctx_type = {
@@ -39,10 +70,10 @@ rb_data_type_t vibe_zstd_dctx_type = {
     .function = {
         .dmark = NULL,
         .dfree = (RUBY_DATA_FUNC)vibe_zstd_dctx_free,
-        .dsize = NULL,
+        .dsize = vibe_zstd_dctx_dsize,
     },
     .data = NULL,
-    .flags = RUBY_TYPED_FREE_IMMEDIATELY,
+    .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED,
 };
 
 rb_data_type_t vibe_zstd_cdict_type = {
@@ -50,10 +81,10 @@ rb_data_type_t vibe_zstd_cdict_type = {
     .function = {
         .dmark = NULL,
         .dfree = (RUBY_DATA_FUNC)vibe_zstd_cdict_free,
-        .dsize = NULL,
+        .dsize = vibe_zstd_cdict_dsize,
     },
     .data = NULL,
-    .flags = RUBY_TYPED_FREE_IMMEDIATELY,
+    .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED,
 };
 
 rb_data_type_t vibe_zstd_ddict_type = {
@@ -61,10 +92,10 @@ rb_data_type_t vibe_zstd_ddict_type = {
     .function = {
         .dmark = NULL,
         .dfree = (RUBY_DATA_FUNC)vibe_zstd_ddict_free,
-        .dsize = NULL,
+        .dsize = vibe_zstd_ddict_dsize,
     },
     .data = NULL,
-    .flags = RUBY_TYPED_FREE_IMMEDIATELY,
+    .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED,
 };
 
 rb_data_type_t vibe_zstd_cstream_type = {
@@ -72,10 +103,10 @@ rb_data_type_t vibe_zstd_cstream_type = {
     .function = {
         .dmark = (RUBY_DATA_FUNC)vibe_zstd_cstream_mark,
         .dfree = (RUBY_DATA_FUNC)vibe_zstd_cstream_free,
-        .dsize = NULL,
+        .dsize = vibe_zstd_cstream_dsize,
     },
     .data = NULL,
-    .flags = RUBY_TYPED_FREE_IMMEDIATELY,
+    .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED,
 };
 
 rb_data_type_t vibe_zstd_dstream_type = {
@@ -83,10 +114,10 @@ rb_data_type_t vibe_zstd_dstream_type = {
     .function = {
         .dmark = (RUBY_DATA_FUNC)vibe_zstd_dstream_mark,
         .dfree = (RUBY_DATA_FUNC)vibe_zstd_dstream_free,
-        .dsize = NULL,
+        .dsize = vibe_zstd_dstream_dsize,
     },
     .data = NULL,
-    .flags = RUBY_TYPED_FREE_IMMEDIATELY,
+    .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED,
 };
 
 // Free functions
@@ -130,6 +161,7 @@ static void
 vibe_zstd_cstream_mark(void* ptr) {
     vibe_zstd_cstream* cstream = ptr;
     rb_gc_mark(cstream->io);
+    rb_gc_mark(cstream->output_buffer);
 }
 
 static void
@@ -200,6 +232,7 @@ vibe_zstd_cstream_alloc(VALUE klass) {
     vibe_zstd_cstream* cstream = ALLOC(vibe_zstd_cstream);
     cstream->cstream = NULL;
     cstream->io = Qnil;
+    cstream->output_buffer = Qnil;
     return TypedData_Wrap_Struct(klass, &vibe_zstd_cstream_type, cstream);
 }
 
@@ -257,9 +290,8 @@ vibe_zstd_default_c_level(VALUE self) {
 RUBY_FUNC_EXPORTED void
 Init_vibe_zstd(void)
 {
-  // Initialize parameter lookup tables
-  init_cctx_param_table();
-  init_dctx_param_table();
+  // Parameter lookup tables are initialized in vibe_zstd_cctx_init_class()
+  // and vibe_zstd_dctx_init_class() respectively - no need to call here.
 
   rb_mVibeZstd = rb_define_module("VibeZstd");
 

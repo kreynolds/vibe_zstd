@@ -9,14 +9,12 @@ static int
 vibe_zstd_cctx_init_param_iter(VALUE key, VALUE value, VALUE self) {
     // Build the setter method name: key + "="
     const char* key_str = rb_id2name(SYM2ID(key));
-    size_t setter_len = strlen(key_str) + 2;  // +1 for '=' + 1 for '\0'
-    char* setter = ALLOC_N(char, setter_len);
-    snprintf(setter, setter_len, "%s=", key_str);
+    char setter[256];
+    snprintf(setter, sizeof(setter), "%s=", key_str);
 
     // Call the setter method
     rb_funcall(self, rb_intern(setter), 1, value);
 
-    xfree(setter);
     return ST_CONTINUE;
 }
 

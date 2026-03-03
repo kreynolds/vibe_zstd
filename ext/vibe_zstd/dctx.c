@@ -1,5 +1,6 @@
 // DCtx implementation for VibeZstd
 #include "vibe_zstd_internal.h"
+#include <stdlib.h>  // malloc, realloc, free for no-GVL decompression path
 
 // TypedData type - defined in vibe_zstd.c
 extern rb_data_type_t vibe_zstd_dctx_type;
@@ -12,14 +13,12 @@ static int
 vibe_zstd_dctx_init_param_iter(VALUE key, VALUE value, VALUE self) {
     // Build the setter method name: key + "="
     const char* key_str = rb_id2name(SYM2ID(key));
-    size_t setter_len = strlen(key_str) + 2;
-    char* setter = ALLOC_N(char, setter_len);
-    snprintf(setter, setter_len, "%s=", key_str);
+    char setter[256];
+    snprintf(setter, sizeof(setter), "%s=", key_str);
 
     // Call the setter method
     rb_funcall(self, rb_intern(setter), 1, value);
 
-    xfree(setter);
     return ST_CONTINUE;
 }
 
@@ -244,6 +243,76 @@ decompress_without_gvl(void* arg) {
     return NULL;
 }
 
+// Decompress stream args for GVL release (unknown content size path)
+// Uses plain C malloc/realloc since Ruby API calls are not allowed without GVL
+typedef struct {
+    ZSTD_DCtx *dctx;
+    const char *src;
+    size_t src_size;
+    char *dst;
+    size_t dst_capacity;
+    size_t dst_size;
+    size_t initial_capacity;
+    int error;
+    const char *error_name;
+} decompress_stream_nogvl_args;
+
+// Decompress stream without holding Ruby's GVL (unknown content size path)
+// Performs the entire ZSTD_decompressStream loop using C malloc/realloc.
+// No Ruby API calls allowed here.
+static void*
+decompress_stream_without_gvl(void* arg) {
+    decompress_stream_nogvl_args* args = arg;
+    args->error = 0;
+    args->error_name = NULL;
+
+    args->dst_capacity = args->initial_capacity;
+    args->dst = malloc(args->dst_capacity);
+    if (!args->dst) {
+        args->error = 1;
+        args->error_name = "malloc failed for decompression buffer";
+        return NULL;
+    }
+    args->dst_size = 0;
+
+    ZSTD_inBuffer input = { args->src, args->src_size, 0 };
+
+    while (input.pos < input.size) {
+        // Ensure we have room for output
+        if (args->dst_size >= args->dst_capacity) {
+            size_t new_capacity = args->dst_capacity * 2;
+            char* new_buf = realloc(args->dst, new_capacity);
+            if (!new_buf) {
+                args->error = 1;
+                args->error_name = "realloc failed during decompression";
+                return NULL;
+            }
+            args->dst = new_buf;
+            args->dst_capacity = new_capacity;
+        }
+
+        ZSTD_outBuffer output = {
+            args->dst + args->dst_size,
+            args->dst_capacity - args->dst_size,
+            0
+        };
+
+        size_t ret = ZSTD_decompressStream(args->dctx, &output, &input);
+        if (ZSTD_isError(ret)) {
+            args->error = 1;
+            args->error_name = ZSTD_getErrorName(ret);
+            return NULL;
+        }
+
+        args->dst_size += output.pos;
+
+        // ret == 0 means frame is complete
+        if (ret == 0) break;
+    }
+
+    return NULL;
+}
+
 // DCtx frame_content_size - class method to get frame content size
 static VALUE
 vibe_zstd_dctx_frame_content_size(VALUE self, VALUE data) {
@@ -353,44 +422,32 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
         }
     }
 
-    // If content size is unknown, use streaming decompression with exponential growth
+    // If content size is unknown, use streaming decompression with exponential growth.
+    // Releases GVL to allow other Ruby threads to run during decompression.
+    // Uses C malloc/realloc (not Ruby allocators) since Ruby API calls are forbidden without GVL.
     if (contentSize == ZSTD_CONTENTSIZE_UNKNOWN) {
-        size_t chunk_size = ZSTD_DStreamOutSize();  // Fixed chunk buffer size
-        VALUE tmpBuffer = rb_str_buf_new(chunk_size);
+        decompress_stream_nogvl_args stream_args = {
+            .dctx = dctx->dctx,
+            .src = src,
+            .src_size = srcSize,
+            .dst = NULL,
+            .dst_capacity = 0,
+            .dst_size = 0,
+            .initial_capacity = initial_capacity,
+            .error = 0,
+            .error_name = NULL
+        };
 
-        // Start with configured initial capacity
-        size_t result_capacity = initial_capacity;
-        size_t result_size = 0;
-        VALUE result = rb_str_buf_new(result_capacity);
+        rb_thread_call_without_gvl(decompress_stream_without_gvl, &stream_args, NULL, NULL);
 
-        ZSTD_inBuffer input = { src, srcSize, 0 };
-
-        while (input.pos < input.size) {
-            ZSTD_outBuffer output = { RSTRING_PTR(tmpBuffer), chunk_size, 0 };
-
-            size_t ret = ZSTD_decompressStream(dctx->dctx, &output, &input);
-            if (ZSTD_isError(ret)) {
-                rb_raise(rb_eRuntimeError, "Decompression failed: %s", ZSTD_getErrorName(ret));
-            }
-
-            if (output.pos > 0) {
-                // Grow result buffer exponentially if needed
-                if (result_size + output.pos > result_capacity) {
-                    // Double capacity until it fits
-                    while (result_capacity < result_size + output.pos) {
-                        result_capacity *= 2;
-                    }
-                    rb_str_resize(result, result_capacity);
-                }
-
-                // Copy directly into result buffer
-                memcpy(RSTRING_PTR(result) + result_size, RSTRING_PTR(tmpBuffer), output.pos);
-                result_size += output.pos;
-            }
+        if (stream_args.error) {
+            if (stream_args.dst) free(stream_args.dst);
+            rb_raise(rb_eRuntimeError, "Decompression failed: %s", stream_args.error_name);
         }
 
-        // Trim to actual size
-        rb_str_resize(result, result_size);
+        // Create Ruby string from the C buffer, then free the C buffer
+        VALUE result = rb_str_new(stream_args.dst, stream_args.dst_size);
+        free(stream_args.dst);
         return result;
     }
     VALUE result = rb_str_new(NULL, contentSize);

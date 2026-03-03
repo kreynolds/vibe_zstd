@@ -39,9 +39,7 @@ module VibeZstd
 
       # Defense: Prevent infinite loop on malformed data
       # A valid frame must have non-zero size (at minimum: frame header)
-      if frame_size <= 0
-        raise Error, "Invalid frame: zero or negative size at offset #{offset}"
-      end
+      raise Error, "Invalid frame: zero or negative size at offset #{offset}" if frame_size <= 0
 
       if skippable_frame?(frame_data)
         content, magic_variant = read_skippable_frame(frame_data)
@@ -191,8 +189,14 @@ module VibeZstd
     end
 
     # Read all remaining data
+    # Drains any buffered data from line_buffer first
     def read_all
       chunks = []
+      # Drain line buffer first if present
+      if @line_buffer && !@line_buffer.empty?
+        chunks << @line_buffer
+        @line_buffer = +""
+      end
       while (chunk = read)
         chunks << chunk
       end
@@ -214,20 +218,29 @@ module VibeZstd
       end
     end
 
-    # Read a single line (up to newline or EOF)
+    # Read a single line (up to separator or EOF)
+    # Uses buffered reads (8192 bytes) instead of byte-at-a-time for performance.
+    # Orders of magnitude faster for line-oriented reading.
     def gets(sep = $/)
-      return nil if eof?
+      return nil if eof? && (@line_buffer.nil? || @line_buffer.empty?)
 
-      line = +""
-      until eof?
-        chunk = read(1)
+      @line_buffer ||= +""
+
+      loop do
+        # Check buffer for separator
+        if (idx = @line_buffer.index(sep))
+          return @line_buffer.slice!(0, idx + sep.bytesize)
+        end
+
+        # Read more data in larger chunks
+        chunk = read(8192)
         break unless chunk
 
-        line << chunk
-        break if chunk.end_with?(sep)
+        @line_buffer << chunk
       end
 
-      line.empty? ? nil : line
+      # Return remaining buffer or nil
+      @line_buffer.empty? ? nil : @line_buffer.slice!(0, @line_buffer.bytesize)
     end
 
     # Iterate over lines
