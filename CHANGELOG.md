@@ -22,7 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `RUBY_TYPED_WB_PROTECTED` and proper write barriers to all typed structs for GC correctness
 
 ### Performance
-- Binary search (`bsearch`) for CCtx parameter lookup instead of O(n) linear scan
 - Stack-allocated string buffer in CCtx setter, eliminating a malloc/free per keyword-argument call
 - Cache `id_write`/`id_read` as static IDs instead of calling `rb_intern` on every I/O call
 - Remove redundant `init_cctx_param_table`/`init_dctx_param_table` calls at startup

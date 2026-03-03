@@ -191,36 +191,25 @@ static cctx_param_entry cctx_param_table[] = {
 
 #define CCTX_PARAM_TABLE_SIZE (sizeof(cctx_param_table) / sizeof(cctx_param_entry))
 
-// Comparator for sorting and searching the parameter table by symbol_id
-static int
-cctx_param_compare(const void *a, const void *b) {
-    const cctx_param_entry *ea = a, *eb = b;
-    if (ea->symbol_id < eb->symbol_id) return -1;
-    if (ea->symbol_id > eb->symbol_id) return 1;
-    return 0;
-}
-
-// Initialize parameter lookup table symbol IDs and sort for binary search
+// Initialize parameter lookup table symbol IDs
 static void
 init_cctx_param_table(void) {
     for (size_t i = 0; i < CCTX_PARAM_TABLE_SIZE; i++) {
         cctx_param_table[i].symbol_id = rb_intern(cctx_param_table[i].name);
     }
-    qsort(cctx_param_table, CCTX_PARAM_TABLE_SIZE, sizeof(cctx_param_entry), cctx_param_compare);
 }
 
-// Helper: look up parameter enum from symbol ID using binary search
+// Helper: look up parameter enum from symbol ID
 // Maps Ruby symbol (e.g., :compression_level) to ZSTD parameter constant
 // Returns 1 if found, 0 if unknown parameter
 static int
 lookup_cctx_param(ID symbol_id, ZSTD_cParameter* param_out, const char** name_out) {
-    cctx_param_entry key = { .symbol_id = symbol_id };
-    cctx_param_entry *found = bsearch(&key, cctx_param_table, CCTX_PARAM_TABLE_SIZE,
-                                       sizeof(cctx_param_entry), cctx_param_compare);
-    if (found) {
-        *param_out = found->param;
-        if (name_out) *name_out = found->name;
-        return 1;
+    for (size_t i = 0; i < CCTX_PARAM_TABLE_SIZE; i++) {
+        if (cctx_param_table[i].symbol_id == symbol_id) {
+            *param_out = cctx_param_table[i].param;
+            if (name_out) *name_out = cctx_param_table[i].name;
+            return 1;
+        }
     }
     return 0;
 }
