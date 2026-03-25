@@ -544,6 +544,31 @@ class TestStreaming < Minitest::Test
     assert_match(/must be greater than 0/i, error.message)
   end
 
+  def test_compress_writer_many_small_writes_to_file
+    # Reproduces shared string bug: when writing to a real File IO, Ruby 3.3+
+    # COW-shares the internal output buffer during IO#write, causing
+    # rb_str_set_len to fail with "can't set length of shared string".
+    # Requires enough data to force ZSTD to emit output during write() calls
+    # (not just at finish), so the buffer gets passed to IO#write mid-stream.
+    require "tempfile"
+
+    original_lines = []
+    Tempfile.create(["shared_string_test", ".zst"]) do |f|
+      VibeZstd::CompressWriter.open(f, level: 6) do |writer|
+        2000.times do |i|
+          line = "func_#{i}\t2\t#{"a" * 80}\t#{i + 10}\t{\"key\":\"value_#{i}\"}\n"
+          original_lines << line
+          writer.write(line)
+        end
+      end
+
+      f.rewind
+      compressed = f.read
+      decompressed = VibeZstd.decompress(compressed)
+      assert_equal(original_lines.join, decompressed)
+    end
+  end
+
   def test_initial_chunk_size_with_bounded_reads
     # Verify that initial_chunk_size doesn't affect explicitly sized reads
     data = "H" * 100_000

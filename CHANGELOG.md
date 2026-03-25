@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-03-25
+
+### Fixed
+- Fix `RuntimeError: can't set length of shared string` in `CompressWriter` when writing to File IO on Ruby 3.3+ caused by COW buffer sharing during `IO#write`
+- Fix vendored zstd build flags (`-DZSTD_MULTITHREAD`, `-DXXH_NAMESPACE`, `-DZSTD_LEGACY_SUPPORT`) not propagating to compiled sources, restoring multithreaded compression support (`workers`, `rsyncable` parameters)
+
 ## [1.1.0] - 2026-03-02
 
 ### Added
@@ -48,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Thread pool support for parallel compression
 - Memory-efficient API for large files
 
+[1.1.1]: https://github.com/kreynolds/vibe_zstd/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/kreynolds/vibe_zstd/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/kreynolds/vibe_zstd/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/kreynolds/vibe_zstd/compare/v1.0.0...v1.0.1
