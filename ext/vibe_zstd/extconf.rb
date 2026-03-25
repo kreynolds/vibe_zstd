@@ -14,10 +14,11 @@ $INCFLAGS << " -I#{LIBZSTD_DIR}/decompress"
 $INCFLAGS << " -I#{LIBZSTD_DIR}/dictBuilder"
 # standard:enable Style/GlobalVars
 
-# Add preprocessor definitions
-append_cflags("-DXXH_NAMESPACE=ZSTD_")
-append_cflags("-DZSTD_LEGACY_SUPPORT=0") # Disable legacy support to reduce size
-append_cflags("-DZSTD_MULTITHREAD") # Enable multithreading support
+# Add preprocessor definitions (use $defs so they appear in DEFS in the Makefile,
+# append_cflags only validates the flag but doesn't reliably propagate -D flags)
+$defs << "-DXXH_NAMESPACE=ZSTD_"
+$defs << "-DZSTD_LEGACY_SUPPORT=0" # Disable legacy support to reduce size
+$defs << "-DZSTD_MULTITHREAD" # Enable multithreading support
 
 # Link with pthread for multithreading
 have_library("pthread") || abort("pthread library is required for multithreading support")

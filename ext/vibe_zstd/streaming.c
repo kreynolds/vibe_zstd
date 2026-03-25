@@ -116,7 +116,11 @@ vibe_zstd_writer_write(VALUE self, VALUE data) {
 
     // Process all input data in chunks
     while (input.pos < input.size) {
-        rb_str_set_len(outBuffer, 0);  // Reset buffer for reuse
+        // Unshare buffer if COW-shared by a prior IO#write receiver (Ruby 3.3+),
+        // then restore capacity which may have shrunk during unsharing
+        rb_str_modify(outBuffer);
+        rb_str_resize(outBuffer, (long)outBufferSize);
+        rb_str_set_len(outBuffer, 0);
         ZSTD_outBuffer output = {
             .dst = RSTRING_PTR(outBuffer),
             .size = outBufferSize,
@@ -154,7 +158,9 @@ vibe_zstd_writer_flush(VALUE self) {
     // ZSTD_e_flush: flush internal buffers, making all data readable
     // Loop until remaining == 0 (flush complete)
     do {
-        rb_str_set_len(outBuffer, 0);  // Reset buffer for reuse
+        rb_str_modify(outBuffer);
+        rb_str_resize(outBuffer, (long)outBufferSize);
+        rb_str_set_len(outBuffer, 0);
         ZSTD_outBuffer output = {
             .dst = RSTRING_PTR(outBuffer),
             .size = outBufferSize,
@@ -190,7 +196,9 @@ vibe_zstd_writer_finish(VALUE self) {
     // ZSTD_e_end: finalize frame with checksum and epilogue
     // Loop until remaining == 0 (frame complete)
     do {
-        rb_str_set_len(outBuffer, 0);  // Reset buffer for reuse
+        rb_str_modify(outBuffer);
+        rb_str_resize(outBuffer, (long)outBufferSize);
+        rb_str_set_len(outBuffer, 0);
         ZSTD_outBuffer output = {
             .dst = RSTRING_PTR(outBuffer),
             .size = outBufferSize,
