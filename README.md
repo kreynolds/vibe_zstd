@@ -134,6 +134,21 @@ decompressed = VibeZstd.decompress(compressed)
 compressed = VibeZstd.compress(data, level: 5)
 ```
 
+The convenience methods accept the same options as `CCtx#compress` /
+`DCtx#decompress`, plus any context (sticky) parameter, which is applied to the
+internally-created context:
+
+```ruby
+# Per-call options (level, dict, pledged_size / dict, initial_capacity, max_size)
+compressed = VibeZstd.compress(data, level: 9, dict: cdict)
+decompressed = VibeZstd.decompress(compressed, dict: ddict, max_size: 10 * 1024 * 1024)
+
+# Context parameters work too (checksum_flag, window_log, workers, format, ...)
+compressed = VibeZstd.compress(data, checksum_flag: true, window_log: 20)
+
+# An unknown keyword raises NoMethodError instead of being silently ignored.
+```
+
 ### Using Contexts (Recommended)
 
 For multiple operations, create reusable contexts:
@@ -550,6 +565,50 @@ VibeZstd::DCtx.default_initial_capacity = nil
 - **Large data (> 1MB)**: Set to `1_048_576` or higher
 - **Known-size frames**: Not applicable (size read from frame header)
 
+#### Limiting Decompressed Size
+
+When decompressing untrusted data, an attacker-controlled frame can declare or
+expand to an enormous output (a "decompression bomb"). Set an opt-in output-size
+limit; exceeding it raises `VibeZstd::DecompressedSizeExceeded` (a subclass of
+`VibeZstd::Error`). It is off by default, so existing behavior is unchanged.
+
+```ruby
+# Per call (alias: max_size)
+VibeZstd::DCtx.new.decompress(data, max_decompressed_size: 50 * 1024 * 1024)
+
+# Per instance
+dctx = VibeZstd::DCtx.new(max_decompressed_size: 50 * 1024 * 1024)
+
+# Class default for all new instances
+VibeZstd::DCtx.default_max_decompressed_size = 100 * 1024 * 1024
+VibeZstd::DCtx.default_max_decompressed_size = nil  # unlimited again
+
+# Resolution order: per-call → instance → class default → unlimited
+begin
+  dctx.decompress(untrusted)
+rescue VibeZstd::DecompressedSizeExceeded => e
+  warn "rejected oversized payload: #{e.message}"
+end
+```
+
+For frames with a known content size the limit is checked against the declared
+size *before* allocating; for unknown-size frames the output buffer never grows
+past the limit. This complements `window_log_max`, which bounds decoder *window*
+memory but not total output size.
+
+#### Magicless Frames
+
+Frames compressed with `format: 1` (`ZSTD_f_zstd1_magicless`) omit the 4-byte
+magic number. Decompress them by setting the same format on the decompression
+side:
+
+```ruby
+compressed = VibeZstd.compress(data, format: 1)        # CCtx format parameter
+original = VibeZstd.decompress(compressed, format: 1)  # DCtx#format / #format=
+```
+
+A magicless `DCtx` cannot read ordinary (magic-prefixed) frames, and vice versa.
+
 ### Memory Estimation
 
 Estimate memory usage before creating contexts:
@@ -810,8 +869,9 @@ end
 ### Module Methods
 
 ```ruby
-VibeZstd.compress(data, level: nil, dict: nil)
-VibeZstd.decompress(data, dict: nil)
+# Per-call options plus any context (sticky) parameter as a keyword.
+VibeZstd.compress(data, level: nil, dict: nil, pledged_size: nil, **ctx_params)
+VibeZstd.decompress(data, dict: nil, initial_capacity: nil, max_decompressed_size: nil, **ctx_params)
 VibeZstd.frame_content_size(data)
 VibeZstd.compress_bound(size)
 VibeZstd.train_dict(samples, max_dict_size: 112640)
@@ -839,6 +899,7 @@ cctx.content_size_flag = 1
 cctx.compression_level = 9
 cctx.window_log = 20
 cctx.workers = 4
+cctx.format = 1   # ZSTD_f_zstd1_magicless (omit the 4-byte magic number)
 # ... and many more
 
 # Class methods
@@ -850,13 +911,16 @@ VibeZstd::CCtx.estimate_memory(level)
 
 ```ruby
 dctx = VibeZstd::DCtx.new(**params)
-dctx.decompress(data, dict: nil, initial_capacity: nil)
+dctx.decompress(data, dict: nil, initial_capacity: nil, max_decompressed_size: nil)
 dctx.use_prefix(prefix_data)
 dctx.initial_capacity = 1_048_576
 dctx.window_log_max = 20
+dctx.max_decompressed_size = 50 * 1024 * 1024  # alias: max_size; raises DecompressedSizeExceeded
+dctx.format = 1                                # ZSTD_d_format (magicless frames)
 
 # Class methods
 VibeZstd::DCtx.default_initial_capacity = value
+VibeZstd::DCtx.default_max_decompressed_size = value  # 0/nil = unlimited
 VibeZstd::DCtx.parameter_bounds(param)
 VibeZstd::DCtx.frame_content_size(data)
 VibeZstd::DCtx.estimate_memory
