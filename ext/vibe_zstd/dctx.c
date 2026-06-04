@@ -426,6 +426,17 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
     // Releases GVL to allow other Ruby threads to run during decompression.
     // Uses C malloc/realloc (not Ruby allocators) since Ruby API calls are forbidden without GVL.
     if (contentSize == ZSTD_CONTENTSIZE_UNKNOWN) {
+        // Reference the dictionary on the context before streaming decompression.
+        // ZSTD_decompressStream uses whatever dict is referenced on the DCtx, so
+        // without this the dictionary would be ignored on the unknown-size path
+        // (every dict frame produced by CompressWriter has unknown content size).
+        if (ddict) {
+            size_t rd = ZSTD_DCtx_refDDict(dctx->dctx, ddict);
+            if (ZSTD_isError(rd)) {
+                rb_raise(rb_eRuntimeError, "Failed to reference dictionary: %s", ZSTD_getErrorName(rd));
+            }
+        }
+
         decompress_stream_nogvl_args stream_args = {
             .dctx = dctx->dctx,
             .src = src,
@@ -439,6 +450,10 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
         };
 
         rb_thread_call_without_gvl(decompress_stream_without_gvl, &stream_args, NULL, NULL);
+
+        // Return the context to no-dictionary mode so subsequent calls on this
+        // DCtx (e.g. decompressing a non-dictionary frame) are not affected.
+        if (ddict) ZSTD_DCtx_refDDict(dctx->dctx, NULL);
 
         if (stream_args.error) {
             if (stream_args.dst) free(stream_args.dst);
