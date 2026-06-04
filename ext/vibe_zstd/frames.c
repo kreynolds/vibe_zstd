@@ -81,12 +81,23 @@ vibe_zstd_read_skippable_frame(VALUE self, VALUE data) {
     uint32_t content_size;
     memcpy(&content_size, src + 4, 4);
 
-    VALUE result = rb_str_buf_new(content_size);
+    // The content size field is attacker-controlled and may claim up to ~4 GiB.
+    // A skippable frame's content cannot exceed the bytes actually provided
+    // (src_size minus the 8-byte header), so cap the allocation accordingly to
+    // prevent a tiny truncated input from forcing a huge allocation. A frame
+    // whose declared size exceeds what is present is malformed and
+    // ZSTD_readSkippableFrame reports the error below.
+    size_t capacity = content_size;
+    if (capacity > src_size - 8) {
+        capacity = src_size - 8;
+    }
+
+    VALUE result = rb_str_buf_new(capacity);
     unsigned magic_variant;
 
     size_t bytes_read = ZSTD_readSkippableFrame(
         RSTRING_PTR(result),
-        content_size,
+        capacity,
         &magic_variant,
         src,
         src_size

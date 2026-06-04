@@ -429,6 +429,20 @@ class TestVibeZstd < Minitest::Test
     end
   end
 
+  def test_read_skippable_frame_inflated_size_is_rejected_without_huge_alloc
+    # Craft a 12-byte skippable frame whose content-size header lies, claiming
+    # ~4 GiB of content. The allocation is capped at the bytes actually present
+    # (src_size - 8), so this raises cleanly rather than attempting a 4 GiB
+    # allocation driven by the attacker-controlled header.
+    magic = [0x184D2A50].pack("V")        # skippable magic, variant 0
+    inflated = [0xFFFFFFFF].pack("V")     # claims ~4 GiB of content
+    frame = (magic + inflated + "AAAA").b
+
+    assert(VibeZstd.skippable_frame?(frame))
+    error = assert_raises(RuntimeError) { VibeZstd.read_skippable_frame(frame) }
+    assert_match(/skippable frame/, error.message)
+  end
+
   def test_skippable_frame_predicate
     skippable = VibeZstd.write_skippable_frame("metadata")
     compressed = VibeZstd.compress("data")
