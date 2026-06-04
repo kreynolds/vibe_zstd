@@ -122,8 +122,9 @@ module VibeZstd
     # @param data [String] Data to decompress
     # @param dict [DDict] Decompression dictionary (optional)
     # @param initial_capacity [Integer] Initial buffer size for unknown-size frames (optional)
+    # @param max_decompressed_size [Integer] Output-size limit; raises DecompressedSizeExceeded if exceeded (optional)
     # @return [String] Decompressed data
-    def self.decompress(data, dict: nil, initial_capacity: nil)
+    def self.decompress(data, dict: nil, initial_capacity: nil, max_decompressed_size: nil)
       key = dict ? dict.dict_id : :default
 
       # Get or create thread-local context pool
@@ -134,6 +135,7 @@ module VibeZstd
       options = {}
       options[:dict] = dict if dict
       options[:initial_capacity] = initial_capacity if initial_capacity
+      options[:max_decompressed_size] = max_decompressed_size if max_decompressed_size
 
       # C code will validate dict matches frame requirements
       dctx.decompress(data, **options)

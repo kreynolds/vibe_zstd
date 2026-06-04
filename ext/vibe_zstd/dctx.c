@@ -8,6 +8,13 @@ extern rb_data_type_t vibe_zstd_dctx_type;
 // Class-level default for initial capacity (0 = use ZSTD_DStreamOutSize)
 static size_t default_initial_capacity = 0;
 
+// Class-level default output-size limit (0 = unlimited)
+static size_t default_max_decompressed_size = 0;
+
+// VibeZstd::DecompressedSizeExceeded - raised when output exceeds the limit.
+// Defined in vibe_zstd_dctx_init_class, cached here for use on the error path.
+static VALUE rb_eDecompressedSizeExceeded;
+
 // Helper to set DCtx parameter from Ruby keyword argument
 static int
 vibe_zstd_dctx_init_param_iter(VALUE key, VALUE value, VALUE self) {
@@ -217,6 +224,54 @@ vibe_zstd_dctx_set_initial_capacity(VALUE self, VALUE value) {
     return value;
 }
 
+// DCtx default_max_decompressed_size getter (class method); 0 = unlimited
+static VALUE
+vibe_zstd_dctx_get_default_max_decompressed_size(VALUE self) {
+    return SIZET2NUM(default_max_decompressed_size);
+}
+
+// DCtx default_max_decompressed_size setter (class method)
+static VALUE
+vibe_zstd_dctx_set_default_max_decompressed_size(VALUE self, VALUE value) {
+    if (NIL_P(value)) {
+        default_max_decompressed_size = 0;  // unlimited
+    } else {
+        default_max_decompressed_size = NUM2SIZET(value);
+    }
+    return value;
+}
+
+// DCtx max_decompressed_size getter (instance method); reports the effective
+// limit, falling back to the class default. Returns 0 when unlimited.
+static VALUE
+vibe_zstd_dctx_get_max_decompressed_size(VALUE self) {
+    vibe_zstd_dctx* dctx;
+    TypedData_Get_Struct(self, vibe_zstd_dctx, &vibe_zstd_dctx_type, dctx);
+
+    if (dctx->max_decompressed_size == 0) {
+        return SIZET2NUM(default_max_decompressed_size);
+    }
+    return SIZET2NUM(dctx->max_decompressed_size);
+}
+
+// DCtx max_decompressed_size setter (instance method); nil = inherit class default
+static VALUE
+vibe_zstd_dctx_set_max_decompressed_size(VALUE self, VALUE value) {
+    vibe_zstd_dctx* dctx;
+    TypedData_Get_Struct(self, vibe_zstd_dctx, &vibe_zstd_dctx_type, dctx);
+
+    if (NIL_P(value)) {
+        dctx->max_decompressed_size = 0;  // inherit class default
+    } else {
+        size_t limit = NUM2SIZET(value);
+        if (limit == 0) {
+            rb_raise(rb_eArgError, "max_decompressed_size must be positive (or nil to inherit the class default)");
+        }
+        dctx->max_decompressed_size = limit;
+    }
+    return value;
+}
+
 // Decompress args for GVL release
 // This structure packages all arguments needed for decompression so we can
 // call ZSTD functions without holding Ruby's Global VM Lock (GVL).
@@ -255,7 +310,9 @@ typedef struct {
     size_t dst_capacity;
     size_t dst_size;
     size_t initial_capacity;
+    size_t max_size;   // 0 = unlimited; otherwise output must not exceed this
     int error;
+    int limit_exceeded;  // set if output would exceed max_size
     const char *error_name;
 } decompress_stream_nogvl_args;
 
@@ -266,9 +323,14 @@ static void*
 decompress_stream_without_gvl(void* arg) {
     decompress_stream_nogvl_args* args = arg;
     args->error = 0;
+    args->limit_exceeded = 0;
     args->error_name = NULL;
 
     args->dst_capacity = args->initial_capacity;
+    // Never allocate more than the configured limit up front.
+    if (args->max_size && args->dst_capacity > args->max_size) {
+        args->dst_capacity = args->max_size;
+    }
     args->dst = malloc(args->dst_capacity);
     if (!args->dst) {
         args->error = 1;
@@ -283,6 +345,15 @@ decompress_stream_without_gvl(void* arg) {
         // Ensure we have room for output
         if (args->dst_size >= args->dst_capacity) {
             size_t new_capacity = args->dst_capacity * 2;
+            // Clamp growth to the configured limit. If we cannot grow past the
+            // current capacity, the output would exceed the limit.
+            if (args->max_size && new_capacity > args->max_size) {
+                new_capacity = args->max_size;
+            }
+            if (new_capacity <= args->dst_capacity) {
+                args->limit_exceeded = 1;
+                return NULL;
+            }
             char* new_buf = realloc(args->dst, new_capacity);
             if (!new_buf) {
                 args->error = 1;
@@ -400,6 +471,7 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
     ZSTD_DDict* ddict = NULL;
     unsigned int provided_dict_id = 0;
     size_t initial_capacity = 0;  // 0 = not specified in per-call options
+    size_t max_size = 0;          // 0 = not specified in per-call options
 
     if (!NIL_P(options)) {
         VALUE dict_val = rb_hash_aref(options, ID2SYM(rb_intern("dict")));
@@ -416,6 +488,27 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
             if (initial_capacity == 0) {
                 rb_raise(rb_eArgError, "initial_capacity must be positive");
             }
+        }
+
+        // Per-call output-size limit; accepts :max_decompressed_size or :max_size.
+        VALUE max_size_val = rb_hash_aref(options, ID2SYM(rb_intern("max_decompressed_size")));
+        if (NIL_P(max_size_val)) {
+            max_size_val = rb_hash_aref(options, ID2SYM(rb_intern("max_size")));
+        }
+        if (!NIL_P(max_size_val)) {
+            max_size = NUM2SIZET(max_size_val);
+            if (max_size == 0) {
+                rb_raise(rb_eArgError, "max_decompressed_size must be positive");
+            }
+        }
+    }
+
+    // Resolve max_size fallback chain: per-call > instance > class default.
+    // A value of 0 at every level means unlimited.
+    if (max_size == 0) {
+        max_size = dctx->max_decompressed_size;  // instance
+        if (max_size == 0) {
+            max_size = default_max_decompressed_size;  // class
         }
     }
 
@@ -463,7 +556,9 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
             .dst_capacity = 0,
             .dst_size = 0,
             .initial_capacity = initial_capacity,
+            .max_size = max_size,
             .error = 0,
+            .limit_exceeded = 0,
             .error_name = NULL
         };
 
@@ -472,6 +567,12 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
         // Return the context to no-dictionary mode so subsequent calls on this
         // DCtx (e.g. decompressing a non-dictionary frame) are not affected.
         if (ddict) ZSTD_DCtx_refDDict(dctx->dctx, NULL);
+
+        if (stream_args.limit_exceeded) {
+            if (stream_args.dst) free(stream_args.dst);
+            rb_raise(rb_eDecompressedSizeExceeded,
+                     "Decompressed output exceeds limit of %zu bytes", max_size);
+        }
 
         if (stream_args.error) {
             if (stream_args.dst) free(stream_args.dst);
@@ -483,6 +584,13 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
         free(stream_args.dst);
         return result;
     }
+    // Reject a frame whose declared content size exceeds the limit before
+    // allocating the output buffer (the header is attacker-controlled).
+    if (max_size && contentSize > (unsigned long long)max_size) {
+        rb_raise(rb_eDecompressedSizeExceeded,
+                 "Declared content size %llu exceeds limit of %zu bytes", contentSize, max_size);
+    }
+
     VALUE result = rb_str_new(NULL, contentSize);
     decompress_args args = {
         .dctx = dctx->dctx,
@@ -558,6 +666,13 @@ vibe_zstd_dctx_init_class(VALUE rb_cVibeZstdDCtx) {
     // Initialize parameter lookup table
     init_dctx_param_table();
 
+    // Define VibeZstd::Error (base) and VibeZstd::DecompressedSizeExceeded.
+    // Defined here (rather than only in Ruby) so the error is available even if
+    // the C extension is required without the Ruby wrapper. Ruby's
+    // `class Error < StandardError` simply reopens the same class.
+    VALUE rb_eVibeZstdError = rb_define_class_under(rb_mVibeZstd, "Error", rb_eStandardError);
+    rb_eDecompressedSizeExceeded = rb_define_class_under(rb_mVibeZstd, "DecompressedSizeExceeded", rb_eVibeZstdError);
+
     rb_define_alloc_func(rb_cVibeZstdDCtx, vibe_zstd_dctx_alloc);
     rb_define_method(rb_cVibeZstdDCtx, "initialize", vibe_zstd_dctx_initialize, -1);
     rb_define_method(rb_cVibeZstdDCtx, "decompress", vibe_zstd_dctx_decompress, -1);
@@ -582,4 +697,14 @@ vibe_zstd_dctx_init_class(VALUE rb_cVibeZstdDCtx) {
     // Instance-level initial_capacity accessors
     rb_define_method(rb_cVibeZstdDCtx, "initial_capacity", vibe_zstd_dctx_get_initial_capacity, 0);
     rb_define_method(rb_cVibeZstdDCtx, "initial_capacity=", vibe_zstd_dctx_set_initial_capacity, 1);
+
+    // Class-level default_max_decompressed_size accessors (0 = unlimited)
+    rb_define_singleton_method(rb_cVibeZstdDCtx, "default_max_decompressed_size", vibe_zstd_dctx_get_default_max_decompressed_size, 0);
+    rb_define_singleton_method(rb_cVibeZstdDCtx, "default_max_decompressed_size=", vibe_zstd_dctx_set_default_max_decompressed_size, 1);
+
+    // Instance-level max_decompressed_size accessors (with shorter max_size alias)
+    rb_define_method(rb_cVibeZstdDCtx, "max_decompressed_size", vibe_zstd_dctx_get_max_decompressed_size, 0);
+    rb_define_method(rb_cVibeZstdDCtx, "max_decompressed_size=", vibe_zstd_dctx_set_max_decompressed_size, 1);
+    rb_define_alias(rb_cVibeZstdDCtx, "max_size", "max_decompressed_size");
+    rb_define_alias(rb_cVibeZstdDCtx, "max_size=", "max_decompressed_size=");
 }
