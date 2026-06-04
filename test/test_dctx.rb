@@ -392,4 +392,50 @@ class TestDCtx < Minitest::Test
     result = dctx.decompress(compressed, dict: ddict)
     assert_equal(data, result)
   end
+
+  # Magicless format (ZSTD_f_zstd1_magicless) decompression support.
+  def test_format_accessor
+    dctx = VibeZstd::DCtx.new
+    assert_equal(0, dctx.format)
+    dctx.format = 1
+    assert_equal(1, dctx.format)
+  end
+
+  def test_magicless_round_trip
+    data = ("magicless round trip payload " * 200).b
+
+    cctx = VibeZstd::CCtx.new
+    cctx.format = 1
+    compressed = cctx.compress(data)
+
+    # Magicless frame must not begin with the zstd magic number.
+    refute_equal([0x28, 0xB5, 0x2F, 0xFD].pack("C*"), compressed.byteslice(0, 4))
+
+    dctx = VibeZstd::DCtx.new
+    dctx.format = 1
+    assert_equal(data, dctx.decompress(compressed))
+  end
+
+  def test_magicless_round_trip_with_dictionary
+    data = ("magicless dictionary payload field=value " * 100).b
+    samples = (1..400).map { |i| "record #{i} field=value common-prefix-data".b }
+    dict_raw = VibeZstd.train_dict(samples, max_dict_size: 8 * 1024)
+    cdict = VibeZstd::CDict.new(dict_raw, 10)
+    ddict = cdict.to_ddict
+
+    cctx = VibeZstd::CCtx.new
+    cctx.format = 1
+    compressed = cctx.compress(data, dict: cdict)
+
+    dctx = VibeZstd::DCtx.new
+    dctx.format = 1
+    assert_equal(data, dctx.decompress(compressed, dict: ddict))
+  end
+
+  def test_magicless_dctx_rejects_normal_frame
+    normal = VibeZstd::CCtx.new.compress(("ordinary frame " * 50).b)
+    dctx = VibeZstd::DCtx.new
+    dctx.format = 1
+    assert_raises(RuntimeError) { dctx.decompress(normal) }
+  end
 end

@@ -51,7 +51,8 @@ typedef struct {
 } dctx_param_entry;
 
 static dctx_param_entry dctx_param_table[] = {
-    {0, ZSTD_d_windowLogMax, "window_log_max"}
+    {0, ZSTD_d_windowLogMax, "window_log_max"},
+    {0, ZSTD_d_format, "format"}
 };
 
 #define DCTX_PARAM_TABLE_SIZE (sizeof(dctx_param_table) / sizeof(dctx_param_entry))
@@ -136,6 +137,7 @@ vibe_zstd_dctx_get_param_generic(VALUE self, ZSTD_dParameter param, const char* 
 
 // Define all DCtx parameter accessors
 DEFINE_DCTX_PARAM_ACCESSORS(window_log_max, ZSTD_d_windowLogMax, "window_log_max")
+DEFINE_DCTX_PARAM_ACCESSORS(format, ZSTD_d_format, "format")
 
 // DCtx parameter_bounds - query parameter bounds (class method, kept for introspection)
 static VALUE
@@ -353,30 +355,46 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
     size_t srcSize = RSTRING_LEN(data);
     size_t offset = 0;
 
-    // Skip any leading skippable frames
-    while (offset < srcSize && ZSTD_isSkippableFrame(src + offset, srcSize - offset)) {
-        size_t frameSize = ZSTD_findFrameCompressedSize(src + offset, srcSize - offset);
-        if (ZSTD_isError(frameSize)) {
-            rb_raise(rb_eRuntimeError, "Invalid skippable frame at offset %zu: %s", offset, ZSTD_getErrorName(frameSize));
+    // Magicless frames (format = ZSTD_f_zstd1_magicless) carry no magic number,
+    // so frame introspection (content size, dict ID, skippable detection) cannot
+    // be performed. Force the streaming decompress path, which honors the format
+    // parameter set on the context via ZSTD_decompressStream.
+    int dformat = 0;
+    (void)ZSTD_DCtx_getParameter(dctx->dctx, ZSTD_d_format, &dformat);
+    int magicless = (dformat == ZSTD_f_zstd1_magicless);
+
+    unsigned long long contentSize;
+    unsigned int frame_dict_id;
+
+    if (magicless) {
+        contentSize = ZSTD_CONTENTSIZE_UNKNOWN;  // route to streaming path
+        frame_dict_id = 0;                        // cannot read dict ID without magic
+    } else {
+        // Skip any leading skippable frames
+        while (offset < srcSize && ZSTD_isSkippableFrame(src + offset, srcSize - offset)) {
+            size_t frameSize = ZSTD_findFrameCompressedSize(src + offset, srcSize - offset);
+            if (ZSTD_isError(frameSize)) {
+                rb_raise(rb_eRuntimeError, "Invalid skippable frame at offset %zu: %s", offset, ZSTD_getErrorName(frameSize));
+            }
+            offset += frameSize;
         }
-        offset += frameSize;
+
+        // Now check the actual compressed frame
+        if (offset >= srcSize) {
+            rb_raise(rb_eRuntimeError, "No compressed frame found in %zu bytes (only skippable frames)", srcSize);
+        }
+
+        src += offset;
+        srcSize -= offset;
+
+        contentSize = ZSTD_getFrameContentSize(src, srcSize);
+        if (contentSize == ZSTD_CONTENTSIZE_ERROR) {
+            rb_raise(rb_eRuntimeError, "Invalid compressed data: not a valid zstd frame (size: %zu bytes)", srcSize);
+        }
+
+        // Check dictionary requirements from the frame
+        frame_dict_id = ZSTD_getDictID_fromFrame(src, srcSize);
     }
-
-    // Now check the actual compressed frame
-    if (offset >= srcSize) {
-        rb_raise(rb_eRuntimeError, "No compressed frame found in %zu bytes (only skippable frames)", srcSize);
-    }
-
-    src += offset;
-    srcSize -= offset;
-
-    unsigned long long contentSize = ZSTD_getFrameContentSize(src, srcSize);
-    if (contentSize == ZSTD_CONTENTSIZE_ERROR) {
-        rb_raise(rb_eRuntimeError, "Invalid compressed data: not a valid zstd frame (size: %zu bytes)", srcSize);
-    }
-
-    // Check dictionary requirements from the frame
-    unsigned int frame_dict_id = ZSTD_getDictID_fromFrame(src, srcSize);
 
     // Extract keyword arguments
     ZSTD_DDict* ddict = NULL;
@@ -558,6 +576,8 @@ vibe_zstd_dctx_init_class(VALUE rb_cVibeZstdDCtx) {
     rb_define_method(rb_cVibeZstdDCtx, "window_log_max", vibe_zstd_dctx_get_window_log_max, 0);
     rb_define_alias(rb_cVibeZstdDCtx, "max_window_log=", "window_log_max=");
     rb_define_alias(rb_cVibeZstdDCtx, "max_window_log", "window_log_max");
+    rb_define_method(rb_cVibeZstdDCtx, "format=", vibe_zstd_dctx_set_format, 1);
+    rb_define_method(rb_cVibeZstdDCtx, "format", vibe_zstd_dctx_get_format, 0);
 
     // Instance-level initial_capacity accessors
     rb_define_method(rb_cVibeZstdDCtx, "initial_capacity", vibe_zstd_dctx_get_initial_capacity, 0);
