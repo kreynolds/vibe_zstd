@@ -7,18 +7,33 @@ require_relative "vibe_zstd/constants"
 module VibeZstd
   class Error < StandardError; end
 
-  # Convenience method for one-off compression
-  # Supports all CCtx#compress options: level, dict, pledged_size
+  # Keyword options handled per-operation by CCtx#compress / DCtx#decompress.
+  # Any other keyword is treated as a context (sticky) parameter and applied via
+  # the constructor, so e.g. VibeZstd.compress(data, checksum_flag: true) and
+  # VibeZstd.decompress(data, format: 1) work through the convenience methods.
+  # An unknown keyword raises NoMethodError from the corresponding setter.
+  COMPRESS_CALL_OPTIONS = %i[level dict pledged_size].freeze
+  DECOMPRESS_CALL_OPTIONS = %i[dict initial_capacity max_decompressed_size max_size].freeze
+  private_constant :COMPRESS_CALL_OPTIONS, :DECOMPRESS_CALL_OPTIONS
+
+  # Convenience method for one-off compression.
+  # Per-call options (level, dict, pledged_size) are passed to #compress; any
+  # other keyword is a context parameter (e.g. checksum_flag:, window_log:,
+  # workers:, format:) applied to a fresh CCtx.
   def self.compress(data, **options)
-    cctx = CCtx.new
-    cctx.compress(data, **options)
+    call_opts = options.slice(*COMPRESS_CALL_OPTIONS)
+    ctx_opts = options.except(*COMPRESS_CALL_OPTIONS)
+    CCtx.new(**ctx_opts).compress(data, **call_opts)
   end
 
-  # Convenience method for one-off decompression
-  # Supports all DCtx#decompress options: dict, initial_capacity
+  # Convenience method for one-off decompression.
+  # Per-call options (dict, initial_capacity, max_decompressed_size/max_size) are
+  # passed to #decompress; any other keyword is a context parameter (e.g.
+  # format:, window_log_max:) applied to a fresh DCtx.
   def self.decompress(data, **options)
-    dctx = DCtx.new
-    dctx.decompress(data, **options)
+    call_opts = options.slice(*DECOMPRESS_CALL_OPTIONS)
+    ctx_opts = options.except(*DECOMPRESS_CALL_OPTIONS)
+    DCtx.new(**ctx_opts).decompress(data, **call_opts)
   end
 
   # Get the decompressed content size from a compressed frame
