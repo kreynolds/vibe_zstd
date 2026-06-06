@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-06-06
+
 ### Added
 - `DCtx#format` / `#format=` (`ZSTD_d_format`) and magicless-format decompression. Frames produced with `format: 1` (`ZSTD_f_zstd1_magicless`) can now be decompressed by setting `format: 1` on the decompression side.
 - Opt-in decompressed-size limit on `DCtx#decompress`, configurable per-call (`max_decompressed_size:` / `max_size:`), per-instance (`DCtx#max_decompressed_size=`, alias `max_size=`), and as a class default (`DCtx.default_max_decompressed_size=`). Resolved per-call → instance → class → unlimited. Exceeding the limit raises `VibeZstd::DecompressedSizeExceeded` (a subclass of `VibeZstd::Error`). Off by default, preserving existing behavior.
@@ -65,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Thread pool support for parallel compression
 - Memory-efficient API for large files
 
+[1.2.0]: https://github.com/kreynolds/vibe_zstd/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/kreynolds/vibe_zstd/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/kreynolds/vibe_zstd/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/kreynolds/vibe_zstd/compare/v1.0.1...v1.0.2
