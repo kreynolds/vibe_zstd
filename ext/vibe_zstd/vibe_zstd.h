@@ -13,6 +13,7 @@ typedef struct {
 typedef struct {
     ZSTD_DCtx* dctx;
     size_t initial_capacity;  // Initial capacity for unknown-size decompression (0 = use class default)
+    size_t max_decompressed_size;  // Output size limit (0 = inherit class default; class default 0 = unlimited)
 } vibe_zstd_dctx;
 
 typedef struct {

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "stringio"
 
 class TestDCtx < Minitest::Test
   # Basic construction and decompression
@@ -391,5 +392,138 @@ class TestDCtx < Minitest::Test
     dctx = VibeZstd::DCtx.new
     result = dctx.decompress(compressed, dict: ddict)
     assert_equal(data, result)
+  end
+
+  # Magicless format (ZSTD_f_zstd1_magicless) decompression support.
+  def test_format_accessor
+    dctx = VibeZstd::DCtx.new
+    assert_equal(0, dctx.format)
+    dctx.format = 1
+    assert_equal(1, dctx.format)
+  end
+
+  def test_magicless_round_trip
+    data = ("magicless round trip payload " * 200).b
+
+    cctx = VibeZstd::CCtx.new
+    cctx.format = 1
+    compressed = cctx.compress(data)
+
+    # Magicless frame must not begin with the zstd magic number.
+    refute_equal([0x28, 0xB5, 0x2F, 0xFD].pack("C*"), compressed.byteslice(0, 4))
+
+    dctx = VibeZstd::DCtx.new
+    dctx.format = 1
+    assert_equal(data, dctx.decompress(compressed))
+  end
+
+  def test_magicless_round_trip_with_dictionary
+    data = ("magicless dictionary payload field=value " * 100).b
+    samples = (1..400).map { |i| "record #{i} field=value common-prefix-data".b }
+    dict_raw = VibeZstd.train_dict(samples, max_dict_size: 8 * 1024)
+    cdict = VibeZstd::CDict.new(dict_raw, 10)
+    ddict = cdict.to_ddict
+
+    cctx = VibeZstd::CCtx.new
+    cctx.format = 1
+    compressed = cctx.compress(data, dict: cdict)
+
+    dctx = VibeZstd::DCtx.new
+    dctx.format = 1
+    assert_equal(data, dctx.decompress(compressed, dict: ddict))
+  end
+
+  def test_magicless_dctx_rejects_normal_frame
+    normal = VibeZstd::CCtx.new.compress(("ordinary frame " * 50).b)
+    dctx = VibeZstd::DCtx.new
+    dctx.format = 1
+    assert_raises(RuntimeError) { dctx.decompress(normal) }
+  end
+
+  # --- max_decompressed_size (output-size limit) ---------------------------
+
+  PAYLOAD_1MB = ("A" * 1_000_000).b
+
+  # Frame with a known declared content size.
+  def known_size_frame
+    VibeZstd.compress(PAYLOAD_1MB, pledged_size: PAYLOAD_1MB.bytesize)
+  end
+
+  # Frame with unknown content size (streaming writer never pledges a size).
+  def unknown_size_frame
+    io = StringIO.new(+"".b)
+    VibeZstd::CompressWriter.open(io) { |w| w.write(PAYLOAD_1MB) }
+    io.string
+  end
+
+  def teardown
+    # The class default is global state; ensure tests don't leak it.
+    VibeZstd::DCtx.default_max_decompressed_size = nil
+  end
+
+  def test_decompressed_size_exceeded_is_a_vibe_zstd_error
+    assert_operator VibeZstd::DecompressedSizeExceeded, :<, VibeZstd::Error
+  end
+
+  def test_max_size_limit_known_size_path
+    # Known size is rejected from the frame header before allocating.
+    error = assert_raises(VibeZstd::DecompressedSizeExceeded) do
+      VibeZstd::DCtx.new.decompress(known_size_frame, max_decompressed_size: 500_000)
+    end
+    assert_match(/Declared content size 1000000 exceeds limit of 500000/, error.message)
+  end
+
+  def test_max_size_limit_unknown_size_path
+    error = assert_raises(VibeZstd::DecompressedSizeExceeded) do
+      VibeZstd::DCtx.new.decompress(unknown_size_frame, max_decompressed_size: 500_000)
+    end
+    assert_match(/exceeds limit of 500000/, error.message)
+  end
+
+  def test_max_size_under_limit_succeeds_on_both_paths
+    assert_equal(PAYLOAD_1MB, VibeZstd::DCtx.new.decompress(known_size_frame, max_decompressed_size: 2_000_000))
+    assert_equal(PAYLOAD_1MB, VibeZstd::DCtx.new.decompress(unknown_size_frame, max_decompressed_size: 2_000_000))
+  end
+
+  def test_max_size_exact_boundary_succeeds
+    # A limit exactly equal to the output size must succeed (no off-by-one).
+    assert_equal(PAYLOAD_1MB, VibeZstd::DCtx.new.decompress(known_size_frame, max_size: 1_000_000))
+    assert_equal(PAYLOAD_1MB, VibeZstd::DCtx.new.decompress(unknown_size_frame, max_size: 1_000_000))
+  end
+
+  def test_max_size_alias
+    dctx = VibeZstd::DCtx.new
+    dctx.max_size = 500_000
+    assert_equal(500_000, dctx.max_decompressed_size)
+    assert_equal(500_000, dctx.max_size)
+    assert_raises(VibeZstd::DecompressedSizeExceeded) { dctx.decompress(known_size_frame) }
+  end
+
+  def test_max_size_instance_limit
+    dctx = VibeZstd::DCtx.new(max_decompressed_size: 500_000)
+    assert_raises(VibeZstd::DecompressedSizeExceeded) { dctx.decompress(unknown_size_frame) }
+  end
+
+  def test_max_size_class_default_and_per_call_override
+    VibeZstd::DCtx.default_max_decompressed_size = 250_000
+    assert_equal(250_000, VibeZstd::DCtx.default_max_decompressed_size)
+
+    assert_raises(VibeZstd::DecompressedSizeExceeded) do
+      VibeZstd::DCtx.new.decompress(known_size_frame)
+    end
+
+    # Per-call value overrides the class default.
+    assert_equal(PAYLOAD_1MB, VibeZstd::DCtx.new.decompress(known_size_frame, max_size: 2_000_000))
+  end
+
+  def test_max_size_unlimited_by_default
+    assert_equal(0, VibeZstd::DCtx.new.max_decompressed_size)
+    assert_equal(0, VibeZstd::DCtx.default_max_decompressed_size)
+    assert_equal(PAYLOAD_1MB, VibeZstd::DCtx.new.decompress(known_size_frame))
+  end
+
+  def test_max_size_rejects_zero
+    assert_raises(ArgumentError) { VibeZstd::DCtx.new.max_decompressed_size = 0 }
+    assert_raises(ArgumentError) { VibeZstd::DCtx.new.decompress(known_size_frame, max_size: 0) }
   end
 end

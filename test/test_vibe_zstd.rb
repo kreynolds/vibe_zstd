@@ -31,6 +31,48 @@ class TestVibeZstd < Minitest::Test
     assert_equal data, decompressed_dict
   end
 
+  # The convenience methods route per-call options (level, dict, pledged_size /
+  # dict, initial_capacity, max_decompressed_size) to the operation and any
+  # other keyword to the context constructor, so sticky parameters work too.
+  def test_convenience_sets_sticky_context_parameters
+    data = ("A" * 50_000).b
+
+    # Sticky compression parameter applied via a fresh CCtx.
+    without = VibeZstd.compress(data, checksum_flag: false)
+    with = VibeZstd.compress(data, checksum_flag: true)
+    assert_equal(without.bytesize + 4, with.bytesize, "checksum_flag should apply through VibeZstd.compress")
+
+    # Both the per-call (:level) and sticky (:compression_level) names work.
+    assert_equal(data, VibeZstd.decompress(VibeZstd.compress(data, level: 9)))
+    assert_equal(data, VibeZstd.decompress(VibeZstd.compress(data, compression_level: 9)))
+  end
+
+  def test_convenience_magicless_round_trip
+    data = ("magicless via sugar " * 100).b
+
+    # format is a sticky parameter on both sides; routed to the constructors.
+    compressed = VibeZstd.compress(data, format: 1)
+    refute_equal([0x28, 0xB5, 0x2F, 0xFD].pack("C*"), compressed.byteslice(0, 4))
+    assert_equal(data, VibeZstd.decompress(compressed, format: 1))
+  end
+
+  def test_convenience_combines_sticky_and_per_call_options
+    data = ("A" * 1_000_000).b
+    compressed = VibeZstd.compress(data, format: 1)
+
+    # Sticky :format (context) + per-call :max_size (operation) together.
+    assert_raises(VibeZstd::DecompressedSizeExceeded) do
+      VibeZstd.decompress(compressed, format: 1, max_size: 500_000)
+    end
+    assert_equal(data, VibeZstd.decompress(compressed, format: 1, max_size: 2_000_000))
+  end
+
+  def test_convenience_unknown_keyword_raises
+    data = "unknown keyword test"
+    assert_raises(NoMethodError) { VibeZstd.compress(data, bogus_param: 1) }
+    assert_raises(NoMethodError) { VibeZstd.decompress(VibeZstd.compress(data), nonsense: 1) }
+  end
+
   def test_compress_bound
     # Test that compress_bound returns reasonable values
     data_size = 1000
@@ -427,6 +469,20 @@ class TestVibeZstd < Minitest::Test
     assert_raises(ArgumentError) do
       VibeZstd.read_skippable_frame(compressed)
     end
+  end
+
+  def test_read_skippable_frame_inflated_size_is_rejected_without_huge_alloc
+    # Craft a 12-byte skippable frame whose content-size header lies, claiming
+    # ~4 GiB of content. The allocation is capped at the bytes actually present
+    # (src_size - 8), so this raises cleanly rather than attempting a 4 GiB
+    # allocation driven by the attacker-controlled header.
+    magic = [0x184D2A50].pack("V")        # skippable magic, variant 0
+    inflated = [0xFFFFFFFF].pack("V")     # claims ~4 GiB of content
+    frame = (magic + inflated + "AAAA").b
+
+    assert(VibeZstd.skippable_frame?(frame))
+    error = assert_raises(RuntimeError) { VibeZstd.read_skippable_frame(frame) }
+    assert_match(/skippable frame/, error.message)
   end
 
   def test_skippable_frame_predicate

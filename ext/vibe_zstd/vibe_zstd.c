@@ -210,6 +210,7 @@ vibe_zstd_dctx_alloc(VALUE klass) {
         rb_raise(rb_eRuntimeError, "Failed to create ZSTD_DCtx");
     }
     dctx->initial_capacity = 0;  // 0 = use class default
+    dctx->max_decompressed_size = 0;  // 0 = inherit class default
     return TypedData_Wrap_Struct(klass, &vibe_zstd_dctx_type, dctx);
 }
 

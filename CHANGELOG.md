@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-06-06
+
+### Added
+- `DCtx#format` / `#format=` (`ZSTD_d_format`) and magicless-format decompression. Frames produced with `format: 1` (`ZSTD_f_zstd1_magicless`) can now be decompressed by setting `format: 1` on the decompression side.
+- Opt-in decompressed-size limit on `DCtx#decompress`, configurable per-call (`max_decompressed_size:` / `max_size:`), per-instance (`DCtx#max_decompressed_size=`, alias `max_size=`), and as a class default (`DCtx.default_max_decompressed_size=`). Resolved per-call → instance → class → unlimited. Exceeding the limit raises `VibeZstd::DecompressedSizeExceeded` (a subclass of `VibeZstd::Error`). Off by default, preserving existing behavior.
+- `VibeZstd.compress` / `VibeZstd.decompress` now accept context (sticky) parameters as keyword arguments (e.g. `checksum_flag:`, `window_log:`, `workers:`, `format:`), applying them to a fresh context. Per-call options are still passed to the operation.
+
+### Fixed
+- `CCtx#compress` now honors parameters configured on the context (`compression_level`, `checksum_flag`, `window_log`, `workers`, `format`, etc.). It previously used `ZSTD_compressCCtx`, which ignores all sticky parameters, so context configuration was silently discarded and one-shot compression always ran at the default level.
+- `DCtx#decompress` now applies the dictionary on the unknown-content-size path. Dictionary frames produced by `CompressWriter` (which never pledges a size) previously failed to decompress with "Dictionary mismatch".
+- `VibeZstd.read_skippable_frame` caps its allocation to the bytes actually present instead of trusting the frame's content-size header, preventing a tiny truncated input from forcing a multi-gigabyte allocation.
+- Passing an unknown keyword to `VibeZstd.compress` / `VibeZstd.decompress` now raises `NoMethodError` instead of being silently ignored.
+
 ## [1.1.1] - 2026-03-25
 
 ### Fixed
@@ -54,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Thread pool support for parallel compression
 - Memory-efficient API for large files
 
+[1.2.0]: https://github.com/kreynolds/vibe_zstd/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/kreynolds/vibe_zstd/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/kreynolds/vibe_zstd/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/kreynolds/vibe_zstd/compare/v1.0.1...v1.0.2

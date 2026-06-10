@@ -621,17 +621,23 @@ class TestCCtx < Minitest::Test
   end
 
   def test_format_parameter
-    cctx = VibeZstd::CCtx.new
-    dctx = VibeZstd::DCtx.new
+    # Magicless format (ZSTD_f_zstd1_magicless = 1) omits the 4-byte frame magic.
+    # This is a sticky parameter, so #compress must honor it. (Note: DCtx does not
+    # currently expose a decompress-side format parameter, so magicless frames
+    # cannot be round-tripped through this binding.)
+    data = ("Test data for format parameter " * 50).b
+    zstd_magic = [0x28, 0xB5, 0x2F, 0xFD].pack("C*")
 
-    # Test magicless format (ZSTD_f_zstd1_magicless = 1)
+    normal = VibeZstd::CCtx.new.compress(data)
+    assert_equal(zstd_magic, normal.byteslice(0, 4), "normal frame begins with the zstd magic number")
+
+    cctx = VibeZstd::CCtx.new
     cctx.format = 1
     assert_equal(1, cctx.format)
+    magicless = cctx.compress(data)
 
-    data = "Test data for format parameter " * 50
-    compressed = cctx.compress(data)
-    decompressed = dctx.decompress(compressed)
-    assert_equal(data, decompressed)
+    refute_equal(zstd_magic, magicless.byteslice(0, 4), "magicless frame must omit the magic number")
+    assert_equal(normal.bytesize - 4, magicless.bytesize, "magicless frame is exactly 4 bytes shorter")
   end
 
   def test_force_max_window_parameter
@@ -918,5 +924,49 @@ class TestCCtx < Minitest::Test
     # Verify aliases still work for reading
     assert_equal(7, cctx.level)
     assert_equal(2, cctx.workers)
+  end
+
+  # Build deterministic data whose compressed size varies meaningfully with
+  # the compression level (repeated random word combinations).
+  def level_sensitive_data
+    srand(1234)
+    words = %w[alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi]
+    (1..20_000).map { words.sample(3).join("-") }.join(" ").b
+  end
+
+  # Regression: parameters configured on the context (sticky parameters) must
+  # apply to one-shot #compress. Previously #compress used ZSTD_compressCCtx,
+  # which ignores all sticky parameters, so the configured level was silently
+  # discarded and every context compressed at the default level.
+  def test_configured_compression_level_is_honored
+    data = level_sensitive_data
+
+    low = VibeZstd::CCtx.new(compression_level: 1).compress(data)
+    high = VibeZstd::CCtx.new(compression_level: 19).compress(data)
+
+    assert_operator high.bytesize, :<, low.bytesize,
+      "configured compression_level should change one-shot #compress output"
+
+    # Setter form should behave identically to the constructor form.
+    cctx = VibeZstd::CCtx.new
+    cctx.compression_level = 19
+    assert_equal high.bytesize, cctx.compress(data).bytesize
+
+    # Round-trip must still succeed.
+    assert_equal data, VibeZstd::DCtx.new.decompress(high)
+  end
+
+  # Regression: the checksum flag configured on the context must apply to
+  # one-shot #compress. A trailing xxhash64 checksum adds exactly 4 bytes.
+  def test_configured_checksum_flag_is_honored
+    data = ("checksum me " * 100).b
+
+    without = VibeZstd::CCtx.new(checksum_flag: false).compress(data)
+    with = VibeZstd::CCtx.new(checksum_flag: true).compress(data)
+
+    assert_equal without.bytesize + 4, with.bytesize,
+      "configured checksum_flag should append a 4-byte frame checksum"
+
+    assert_equal data, VibeZstd::DCtx.new.decompress(with)
   end
 end

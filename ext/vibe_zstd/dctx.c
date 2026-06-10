@@ -8,6 +8,13 @@ extern rb_data_type_t vibe_zstd_dctx_type;
 // Class-level default for initial capacity (0 = use ZSTD_DStreamOutSize)
 static size_t default_initial_capacity = 0;
 
+// Class-level default output-size limit (0 = unlimited)
+static size_t default_max_decompressed_size = 0;
+
+// VibeZstd::DecompressedSizeExceeded - raised when output exceeds the limit.
+// Defined in vibe_zstd_dctx_init_class, cached here for use on the error path.
+static VALUE rb_eDecompressedSizeExceeded;
+
 // Helper to set DCtx parameter from Ruby keyword argument
 static int
 vibe_zstd_dctx_init_param_iter(VALUE key, VALUE value, VALUE self) {
@@ -51,7 +58,8 @@ typedef struct {
 } dctx_param_entry;
 
 static dctx_param_entry dctx_param_table[] = {
-    {0, ZSTD_d_windowLogMax, "window_log_max"}
+    {0, ZSTD_d_windowLogMax, "window_log_max"},
+    {0, ZSTD_d_format, "format"}
 };
 
 #define DCTX_PARAM_TABLE_SIZE (sizeof(dctx_param_table) / sizeof(dctx_param_entry))
@@ -136,6 +144,7 @@ vibe_zstd_dctx_get_param_generic(VALUE self, ZSTD_dParameter param, const char* 
 
 // Define all DCtx parameter accessors
 DEFINE_DCTX_PARAM_ACCESSORS(window_log_max, ZSTD_d_windowLogMax, "window_log_max")
+DEFINE_DCTX_PARAM_ACCESSORS(format, ZSTD_d_format, "format")
 
 // DCtx parameter_bounds - query parameter bounds (class method, kept for introspection)
 static VALUE
@@ -215,6 +224,54 @@ vibe_zstd_dctx_set_initial_capacity(VALUE self, VALUE value) {
     return value;
 }
 
+// DCtx default_max_decompressed_size getter (class method); 0 = unlimited
+static VALUE
+vibe_zstd_dctx_get_default_max_decompressed_size(VALUE self) {
+    return SIZET2NUM(default_max_decompressed_size);
+}
+
+// DCtx default_max_decompressed_size setter (class method)
+static VALUE
+vibe_zstd_dctx_set_default_max_decompressed_size(VALUE self, VALUE value) {
+    if (NIL_P(value)) {
+        default_max_decompressed_size = 0;  // unlimited
+    } else {
+        default_max_decompressed_size = NUM2SIZET(value);
+    }
+    return value;
+}
+
+// DCtx max_decompressed_size getter (instance method); reports the effective
+// limit, falling back to the class default. Returns 0 when unlimited.
+static VALUE
+vibe_zstd_dctx_get_max_decompressed_size(VALUE self) {
+    vibe_zstd_dctx* dctx;
+    TypedData_Get_Struct(self, vibe_zstd_dctx, &vibe_zstd_dctx_type, dctx);
+
+    if (dctx->max_decompressed_size == 0) {
+        return SIZET2NUM(default_max_decompressed_size);
+    }
+    return SIZET2NUM(dctx->max_decompressed_size);
+}
+
+// DCtx max_decompressed_size setter (instance method); nil = inherit class default
+static VALUE
+vibe_zstd_dctx_set_max_decompressed_size(VALUE self, VALUE value) {
+    vibe_zstd_dctx* dctx;
+    TypedData_Get_Struct(self, vibe_zstd_dctx, &vibe_zstd_dctx_type, dctx);
+
+    if (NIL_P(value)) {
+        dctx->max_decompressed_size = 0;  // inherit class default
+    } else {
+        size_t limit = NUM2SIZET(value);
+        if (limit == 0) {
+            rb_raise(rb_eArgError, "max_decompressed_size must be positive (or nil to inherit the class default)");
+        }
+        dctx->max_decompressed_size = limit;
+    }
+    return value;
+}
+
 // Decompress args for GVL release
 // This structure packages all arguments needed for decompression so we can
 // call ZSTD functions without holding Ruby's Global VM Lock (GVL).
@@ -253,7 +310,9 @@ typedef struct {
     size_t dst_capacity;
     size_t dst_size;
     size_t initial_capacity;
+    size_t max_size;   // 0 = unlimited; otherwise output must not exceed this
     int error;
+    int limit_exceeded;  // set if output would exceed max_size
     const char *error_name;
 } decompress_stream_nogvl_args;
 
@@ -264,9 +323,14 @@ static void*
 decompress_stream_without_gvl(void* arg) {
     decompress_stream_nogvl_args* args = arg;
     args->error = 0;
+    args->limit_exceeded = 0;
     args->error_name = NULL;
 
     args->dst_capacity = args->initial_capacity;
+    // Never allocate more than the configured limit up front.
+    if (args->max_size && args->dst_capacity > args->max_size) {
+        args->dst_capacity = args->max_size;
+    }
     args->dst = malloc(args->dst_capacity);
     if (!args->dst) {
         args->error = 1;
@@ -281,6 +345,15 @@ decompress_stream_without_gvl(void* arg) {
         // Ensure we have room for output
         if (args->dst_size >= args->dst_capacity) {
             size_t new_capacity = args->dst_capacity * 2;
+            // Clamp growth to the configured limit. If we cannot grow past the
+            // current capacity, the output would exceed the limit.
+            if (args->max_size && new_capacity > args->max_size) {
+                new_capacity = args->max_size;
+            }
+            if (new_capacity <= args->dst_capacity) {
+                args->limit_exceeded = 1;
+                return NULL;
+            }
             char* new_buf = realloc(args->dst, new_capacity);
             if (!new_buf) {
                 args->error = 1;
@@ -353,35 +426,52 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
     size_t srcSize = RSTRING_LEN(data);
     size_t offset = 0;
 
-    // Skip any leading skippable frames
-    while (offset < srcSize && ZSTD_isSkippableFrame(src + offset, srcSize - offset)) {
-        size_t frameSize = ZSTD_findFrameCompressedSize(src + offset, srcSize - offset);
-        if (ZSTD_isError(frameSize)) {
-            rb_raise(rb_eRuntimeError, "Invalid skippable frame at offset %zu: %s", offset, ZSTD_getErrorName(frameSize));
+    // Magicless frames (format = ZSTD_f_zstd1_magicless) carry no magic number,
+    // so frame introspection (content size, dict ID, skippable detection) cannot
+    // be performed. Force the streaming decompress path, which honors the format
+    // parameter set on the context via ZSTD_decompressStream.
+    int dformat = 0;
+    (void)ZSTD_DCtx_getParameter(dctx->dctx, ZSTD_d_format, &dformat);
+    int magicless = (dformat == ZSTD_f_zstd1_magicless);
+
+    unsigned long long contentSize;
+    unsigned int frame_dict_id;
+
+    if (magicless) {
+        contentSize = ZSTD_CONTENTSIZE_UNKNOWN;  // route to streaming path
+        frame_dict_id = 0;                        // cannot read dict ID without magic
+    } else {
+        // Skip any leading skippable frames
+        while (offset < srcSize && ZSTD_isSkippableFrame(src + offset, srcSize - offset)) {
+            size_t frameSize = ZSTD_findFrameCompressedSize(src + offset, srcSize - offset);
+            if (ZSTD_isError(frameSize)) {
+                rb_raise(rb_eRuntimeError, "Invalid skippable frame at offset %zu: %s", offset, ZSTD_getErrorName(frameSize));
+            }
+            offset += frameSize;
         }
-        offset += frameSize;
+
+        // Now check the actual compressed frame
+        if (offset >= srcSize) {
+            rb_raise(rb_eRuntimeError, "No compressed frame found in %zu bytes (only skippable frames)", srcSize);
+        }
+
+        src += offset;
+        srcSize -= offset;
+
+        contentSize = ZSTD_getFrameContentSize(src, srcSize);
+        if (contentSize == ZSTD_CONTENTSIZE_ERROR) {
+            rb_raise(rb_eRuntimeError, "Invalid compressed data: not a valid zstd frame (size: %zu bytes)", srcSize);
+        }
+
+        // Check dictionary requirements from the frame
+        frame_dict_id = ZSTD_getDictID_fromFrame(src, srcSize);
     }
-
-    // Now check the actual compressed frame
-    if (offset >= srcSize) {
-        rb_raise(rb_eRuntimeError, "No compressed frame found in %zu bytes (only skippable frames)", srcSize);
-    }
-
-    src += offset;
-    srcSize -= offset;
-
-    unsigned long long contentSize = ZSTD_getFrameContentSize(src, srcSize);
-    if (contentSize == ZSTD_CONTENTSIZE_ERROR) {
-        rb_raise(rb_eRuntimeError, "Invalid compressed data: not a valid zstd frame (size: %zu bytes)", srcSize);
-    }
-
-    // Check dictionary requirements from the frame
-    unsigned int frame_dict_id = ZSTD_getDictID_fromFrame(src, srcSize);
 
     // Extract keyword arguments
     ZSTD_DDict* ddict = NULL;
     unsigned int provided_dict_id = 0;
     size_t initial_capacity = 0;  // 0 = not specified in per-call options
+    size_t max_size = 0;          // 0 = not specified in per-call options
 
     if (!NIL_P(options)) {
         VALUE dict_val = rb_hash_aref(options, ID2SYM(rb_intern("dict")));
@@ -398,6 +488,27 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
             if (initial_capacity == 0) {
                 rb_raise(rb_eArgError, "initial_capacity must be positive");
             }
+        }
+
+        // Per-call output-size limit; accepts :max_decompressed_size or :max_size.
+        VALUE max_size_val = rb_hash_aref(options, ID2SYM(rb_intern("max_decompressed_size")));
+        if (NIL_P(max_size_val)) {
+            max_size_val = rb_hash_aref(options, ID2SYM(rb_intern("max_size")));
+        }
+        if (!NIL_P(max_size_val)) {
+            max_size = NUM2SIZET(max_size_val);
+            if (max_size == 0) {
+                rb_raise(rb_eArgError, "max_decompressed_size must be positive");
+            }
+        }
+    }
+
+    // Resolve max_size fallback chain: per-call > instance > class default.
+    // A value of 0 at every level means unlimited.
+    if (max_size == 0) {
+        max_size = dctx->max_decompressed_size;  // instance
+        if (max_size == 0) {
+            max_size = default_max_decompressed_size;  // class
         }
     }
 
@@ -426,6 +537,17 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
     // Releases GVL to allow other Ruby threads to run during decompression.
     // Uses C malloc/realloc (not Ruby allocators) since Ruby API calls are forbidden without GVL.
     if (contentSize == ZSTD_CONTENTSIZE_UNKNOWN) {
+        // Reference the dictionary on the context before streaming decompression.
+        // ZSTD_decompressStream uses whatever dict is referenced on the DCtx, so
+        // without this the dictionary would be ignored on the unknown-size path
+        // (every dict frame produced by CompressWriter has unknown content size).
+        if (ddict) {
+            size_t rd = ZSTD_DCtx_refDDict(dctx->dctx, ddict);
+            if (ZSTD_isError(rd)) {
+                rb_raise(rb_eRuntimeError, "Failed to reference dictionary: %s", ZSTD_getErrorName(rd));
+            }
+        }
+
         decompress_stream_nogvl_args stream_args = {
             .dctx = dctx->dctx,
             .src = src,
@@ -434,11 +556,23 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
             .dst_capacity = 0,
             .dst_size = 0,
             .initial_capacity = initial_capacity,
+            .max_size = max_size,
             .error = 0,
+            .limit_exceeded = 0,
             .error_name = NULL
         };
 
         rb_thread_call_without_gvl(decompress_stream_without_gvl, &stream_args, NULL, NULL);
+
+        // Return the context to no-dictionary mode so subsequent calls on this
+        // DCtx (e.g. decompressing a non-dictionary frame) are not affected.
+        if (ddict) ZSTD_DCtx_refDDict(dctx->dctx, NULL);
+
+        if (stream_args.limit_exceeded) {
+            if (stream_args.dst) free(stream_args.dst);
+            rb_raise(rb_eDecompressedSizeExceeded,
+                     "Decompressed output exceeds limit of %zu bytes", max_size);
+        }
 
         if (stream_args.error) {
             if (stream_args.dst) free(stream_args.dst);
@@ -450,6 +584,13 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
         free(stream_args.dst);
         return result;
     }
+    // Reject a frame whose declared content size exceeds the limit before
+    // allocating the output buffer (the header is attacker-controlled).
+    if (max_size && contentSize > (unsigned long long)max_size) {
+        rb_raise(rb_eDecompressedSizeExceeded,
+                 "Declared content size %llu exceeds limit of %zu bytes", contentSize, max_size);
+    }
+
     VALUE result = rb_str_new(NULL, contentSize);
     decompress_args args = {
         .dctx = dctx->dctx,
@@ -525,6 +666,13 @@ vibe_zstd_dctx_init_class(VALUE rb_cVibeZstdDCtx) {
     // Initialize parameter lookup table
     init_dctx_param_table();
 
+    // Define VibeZstd::Error (base) and VibeZstd::DecompressedSizeExceeded.
+    // Defined here (rather than only in Ruby) so the error is available even if
+    // the C extension is required without the Ruby wrapper. Ruby's
+    // `class Error < StandardError` simply reopens the same class.
+    VALUE rb_eVibeZstdError = rb_define_class_under(rb_mVibeZstd, "Error", rb_eStandardError);
+    rb_eDecompressedSizeExceeded = rb_define_class_under(rb_mVibeZstd, "DecompressedSizeExceeded", rb_eVibeZstdError);
+
     rb_define_alloc_func(rb_cVibeZstdDCtx, vibe_zstd_dctx_alloc);
     rb_define_method(rb_cVibeZstdDCtx, "initialize", vibe_zstd_dctx_initialize, -1);
     rb_define_method(rb_cVibeZstdDCtx, "decompress", vibe_zstd_dctx_decompress, -1);
@@ -543,8 +691,20 @@ vibe_zstd_dctx_init_class(VALUE rb_cVibeZstdDCtx) {
     rb_define_method(rb_cVibeZstdDCtx, "window_log_max", vibe_zstd_dctx_get_window_log_max, 0);
     rb_define_alias(rb_cVibeZstdDCtx, "max_window_log=", "window_log_max=");
     rb_define_alias(rb_cVibeZstdDCtx, "max_window_log", "window_log_max");
+    rb_define_method(rb_cVibeZstdDCtx, "format=", vibe_zstd_dctx_set_format, 1);
+    rb_define_method(rb_cVibeZstdDCtx, "format", vibe_zstd_dctx_get_format, 0);
 
     // Instance-level initial_capacity accessors
     rb_define_method(rb_cVibeZstdDCtx, "initial_capacity", vibe_zstd_dctx_get_initial_capacity, 0);
     rb_define_method(rb_cVibeZstdDCtx, "initial_capacity=", vibe_zstd_dctx_set_initial_capacity, 1);
+
+    // Class-level default_max_decompressed_size accessors (0 = unlimited)
+    rb_define_singleton_method(rb_cVibeZstdDCtx, "default_max_decompressed_size", vibe_zstd_dctx_get_default_max_decompressed_size, 0);
+    rb_define_singleton_method(rb_cVibeZstdDCtx, "default_max_decompressed_size=", vibe_zstd_dctx_set_default_max_decompressed_size, 1);
+
+    // Instance-level max_decompressed_size accessors (with shorter max_size alias)
+    rb_define_method(rb_cVibeZstdDCtx, "max_decompressed_size", vibe_zstd_dctx_get_max_decompressed_size, 0);
+    rb_define_method(rb_cVibeZstdDCtx, "max_decompressed_size=", vibe_zstd_dctx_set_max_decompressed_size, 1);
+    rb_define_alias(rb_cVibeZstdDCtx, "max_size", "max_decompressed_size");
+    rb_define_alias(rb_cVibeZstdDCtx, "max_size=", "max_decompressed_size=");
 }

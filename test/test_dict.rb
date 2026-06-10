@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "stringio"
 
 class TestDict < Minitest::Test
   # CDict and DDict construction and basic usage
@@ -49,6 +50,34 @@ class TestDict < Minitest::Test
 
     ddict_id = ddict.dict_id
     assert_equal(0, ddict_id)
+  end
+
+  # Regression: a dictionary-compressed frame with unknown content size must be
+  # decompressable via one-shot #decompress when the matching dict is supplied.
+  # CompressWriter never pledges a size, so every frame it produces has unknown
+  # content size and took the streaming decompress path, which previously failed
+  # to reference the dictionary and raised "Dictionary mismatch".
+  def test_decompress_dict_frame_with_unknown_content_size
+    srand(7)
+    samples = (1..600).map do |i|
+      %({"user_id":#{i},"name":"user#{i}","active":#{i.even?},"role":"member"}).b
+    end
+    dict_raw = VibeZstd.train_dict(samples, max_dict_size: 16 * 1024)
+    cdict = VibeZstd::CDict.new(dict_raw, 10)
+    ddict = cdict.to_ddict
+
+    payload = %({"user_id":999,"name":"user999","active":true,"role":"member"}).b
+
+    io = StringIO.new(+"".b)
+    VibeZstd::CompressWriter.open(io, level: 10, dict: cdict) { |w| w.write(payload) }
+    compressed = io.string
+
+    # Sanity: frame really does have unknown content size and requires the dict.
+    assert_nil VibeZstd.frame_content_size(compressed)
+    assert_equal cdict.dict_id, VibeZstd.get_dict_id_from_frame(compressed)
+
+    out = VibeZstd::DCtx.new.decompress(compressed, dict: ddict)
+    assert_equal payload, out
   end
 
   def test_dictionary_ids_with_trained_dictionary

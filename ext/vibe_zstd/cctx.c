@@ -45,35 +45,40 @@ vibe_zstd_cctx_estimate_memory(VALUE self, VALUE level) {
 // Releasing the GVL allows other Ruby threads to run during CPU-intensive compression.
 typedef struct {
     ZSTD_CCtx* cctx;
-    ZSTD_CDict* cdict;
     const void* src;
     size_t srcSize;
     void* dst;
     size_t dstCapacity;
-    int compressionLevel;
     size_t result;
 } compress_args;
 
 // Compress without holding Ruby's GVL
 // Called via rb_thread_call_without_gvl to allow parallel Ruby thread execution
-// during CPU-intensive compression operations
+// during CPU-intensive compression operations.
+//
+// Uses ZSTD_compress2 (the advanced one-shot API) so that "sticky" parameters
+// configured on the context (compression_level, checksum_flag, window_log,
+// workers, long_distance_matching, etc.) are honored. The legacy ZSTD_compressCCtx
+// silently ignores all sticky parameters, which made context configuration a no-op.
 static void*
 compress_without_gvl(void* arg) {
     compress_args* args = arg;
-    if (args->cdict) {
-        args->result = ZSTD_compress_usingCDict(args->cctx, args->dst, args->dstCapacity, args->src, args->srcSize, args->cdict);
-    } else {
-        args->result = ZSTD_compressCCtx(args->cctx, args->dst, args->dstCapacity, args->src, args->srcSize, args->compressionLevel);
-    }
+    args->result = ZSTD_compress2(args->cctx, args->dst, args->dstCapacity, args->src, args->srcSize);
     return NULL;
 }
 
 // CCtx compress - Compress data using this context
 //
-// Supports per-operation parameters via keyword arguments:
-// - level: Compression level (overrides context setting for this operation)
-// - dict: CDict to use for compression
-// - pledged_size: Expected input size for optimization (optional)
+// Honors all parameters configured on the context (sticky parameters), e.g.
+// compression_level, checksum_flag, window_log, workers, etc.
+//
+// Supports per-operation overrides via keyword arguments:
+// - level: Compression level for this call only (restored afterward)
+// - dict: CDict to use for this call only (un-referenced afterward)
+// - pledged_size: Expected input size (enforced; resets after the frame)
+//
+// Per-call overrides are applied around the compression and then restored so
+// repeated one-shot calls on the same context remain independent.
 //
 // Uses ZSTD_compressBound to allocate worst-case output buffer size,
 // which is the recommended approach for one-shot compression.
@@ -86,19 +91,20 @@ vibe_zstd_cctx_compress(int argc, VALUE* argv, VALUE self) {
     TypedData_Get_Struct(self, vibe_zstd_cctx, &vibe_zstd_cctx_type, cctx);
     StringValue(data);
 
-    // Extract keyword arguments
-    int lvl = ZSTD_defaultCLevel();
+    // Extract keyword arguments (all optional, all per-call overrides)
+    int has_level = 0;
+    int lvl = 0;
     ZSTD_CDict* cdict = NULL;
+    int has_pledged = 0;
     unsigned long long pledged_size = ZSTD_CONTENTSIZE_UNKNOWN;
 
     if (!NIL_P(options)) {
-        // Handle level keyword argument
         VALUE level_val = rb_hash_aref(options, ID2SYM(rb_intern("level")));
         if (!NIL_P(level_val)) {
+            has_level = 1;
             lvl = NUM2INT(level_val);
         }
 
-        // Handle dict keyword argument
         VALUE dict_val = rb_hash_aref(options, ID2SYM(rb_intern("dict")));
         if (!NIL_P(dict_val)) {
             vibe_zstd_cdict* cdict_struct;
@@ -106,18 +112,44 @@ vibe_zstd_cctx_compress(int argc, VALUE* argv, VALUE self) {
             cdict = cdict_struct->cdict;
         }
 
-        // Handle pledged_size keyword argument
         VALUE pledged_size_val = rb_hash_aref(options, ID2SYM(rb_intern("pledged_size")));
         if (!NIL_P(pledged_size_val)) {
+            has_pledged = 1;
             pledged_size = NUM2ULL(pledged_size_val);
         }
     }
 
-    // Set pledged size if provided
-    if (pledged_size != ZSTD_CONTENTSIZE_UNKNOWN) {
-        size_t result = ZSTD_CCtx_setPledgedSrcSize(cctx->cctx, pledged_size);
-        if (ZSTD_isError(result)) {
-            rb_raise(rb_eRuntimeError, "Failed to set pledged_size %llu: %s", pledged_size, ZSTD_getErrorName(result));
+    // Apply per-call compression level override without permanently mutating the
+    // context's configured level. The previous value is captured and restored.
+    int prev_level = 0;
+    if (has_level) {
+        size_t gp = ZSTD_CCtx_getParameter(cctx->cctx, ZSTD_c_compressionLevel, &prev_level);
+        if (ZSTD_isError(gp)) {
+            rb_raise(rb_eRuntimeError, "Failed to read compression level: %s", ZSTD_getErrorName(gp));
+        }
+        size_t sp = ZSTD_CCtx_setParameter(cctx->cctx, ZSTD_c_compressionLevel, lvl);
+        if (ZSTD_isError(sp)) {
+            rb_raise(rb_eArgError, "Invalid level %d: %s", lvl, ZSTD_getErrorName(sp));
+        }
+    }
+
+    // Reference a per-call dictionary; un-referenced after compression so the
+    // context returns to no-dictionary mode for subsequent calls.
+    if (cdict) {
+        size_t rc = ZSTD_CCtx_refCDict(cctx->cctx, cdict);
+        if (ZSTD_isError(rc)) {
+            if (has_level) ZSTD_CCtx_setParameter(cctx->cctx, ZSTD_c_compressionLevel, prev_level);
+            rb_raise(rb_eRuntimeError, "Failed to set dictionary: %s", ZSTD_getErrorName(rc));
+        }
+    }
+
+    // Set pledged size if provided (resets to UNKNOWN automatically after the frame)
+    if (has_pledged) {
+        size_t sps = ZSTD_CCtx_setPledgedSrcSize(cctx->cctx, pledged_size);
+        if (ZSTD_isError(sps)) {
+            if (cdict) ZSTD_CCtx_refCDict(cctx->cctx, NULL);
+            if (has_level) ZSTD_CCtx_setParameter(cctx->cctx, ZSTD_c_compressionLevel, prev_level);
+            rb_raise(rb_eRuntimeError, "Failed to set pledged_size %llu: %s", pledged_size, ZSTD_getErrorName(sps));
         }
     }
 
@@ -126,15 +158,18 @@ vibe_zstd_cctx_compress(int argc, VALUE* argv, VALUE self) {
     VALUE result_str = rb_str_new(NULL, dstCapacity);
     compress_args args = {
         .cctx = cctx->cctx,
-        .cdict = cdict,
         .src = RSTRING_PTR(data),
         .srcSize = srcSize,
         .dst = RSTRING_PTR(result_str),
         .dstCapacity = dstCapacity,
-        .compressionLevel = lvl,
         .result = 0
     };
     rb_thread_call_without_gvl(compress_without_gvl, &args, NULL, NULL);
+
+    // Restore context state so repeated one-shot calls remain independent.
+    if (cdict) ZSTD_CCtx_refCDict(cctx->cctx, NULL);
+    if (has_level) ZSTD_CCtx_setParameter(cctx->cctx, ZSTD_c_compressionLevel, prev_level);
+
     if (ZSTD_isError(args.result)) {
         rb_raise(rb_eRuntimeError, "Compression failed: %s", ZSTD_getErrorName(args.result));
     }
