@@ -149,6 +149,18 @@ compressed = VibeZstd.compress(data, checksum_flag: true, window_log: 20)
 # An unknown keyword raises NoMethodError instead of being silently ignored.
 ```
 
+> [!IMPORTANT]
+> **Decompressing untrusted input?** Always set an output-size limit. By default
+> there is no cap, so a tiny malicious frame can demand an enormous allocation
+> (a "decompression bomb"):
+>
+> ```ruby
+> VibeZstd.decompress(untrusted, max_decompressed_size: 50 * 1024 * 1024)
+> ```
+>
+> See [Limiting Decompressed Size](#limiting-decompressed-size) for per-instance
+> and process-wide defaults.
+
 ### Using Contexts (Recommended)
 
 For multiple operations, create reusable contexts:

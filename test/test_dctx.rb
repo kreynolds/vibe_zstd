@@ -526,4 +526,32 @@ class TestDCtx < Minitest::Test
     assert_raises(ArgumentError) { VibeZstd::DCtx.new.max_decompressed_size = 0 }
     assert_raises(ArgumentError) { VibeZstd::DCtx.new.decompress(known_size_frame, max_size: 0) }
   end
+
+  # --- Truncated input raises instead of returning partial data ---------------
+
+  def test_truncated_unknown_size_frame_raises
+    # CompressWriter produces frames with unknown content size (no pledged size).
+    output = StringIO.new(+"".b)
+    VibeZstd::CompressWriter.open(output) { |w| w.write("Hello, truncated world! " * 100) }
+    compressed = output.string
+
+    # Chop the last 10 bytes to produce an incomplete frame.
+    truncated = compressed.byteslice(0, compressed.bytesize - 10)
+
+    dctx = VibeZstd::DCtx.new
+    error = assert_raises(RuntimeError) { dctx.decompress(truncated) }
+    assert_match(/truncated frame/i, error.message)
+  end
+
+  # --- Non-Symbol kwargs raise ArgumentError ----------------------------------
+
+  def test_non_symbol_kwargs_raises_argument_error
+    # Ruby allows string keys in a double-splat hash; the C extension must
+    # reject them with a clear error rather than crashing via SYM2ID.
+    error = assert_raises(ArgumentError) do
+      # Construct an explicit String-keyed hash and pass it as keyword args.
+      VibeZstd::DCtx.new(**{"format" => 1})
+    end
+    assert_match(/must be Symbol/i, error.message)
+  end
 end

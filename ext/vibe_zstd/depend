@@ -1,0 +1,3 @@
+# vibe_zstd.c textually #includes the split implementation files, so the object
+# must be rebuilt when any of them (or the project headers) change.
+vibe_zstd.o: cctx.c dctx.c dict.c streaming.c frames.c vibe_zstd.h vibe_zstd_internal.h

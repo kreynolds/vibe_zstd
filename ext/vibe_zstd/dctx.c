@@ -18,6 +18,14 @@ static VALUE rb_eDecompressedSizeExceeded;
 // Helper to set DCtx parameter from Ruby keyword argument
 static int
 vibe_zstd_dctx_init_param_iter(VALUE key, VALUE value, VALUE self) {
+    // Guard: only Symbol keys are valid.  A non-Symbol key (e.g. a String like
+    // "format" => 1) would make SYM2ID undefined behaviour, so reject it early.
+    if (!SYMBOL_P(key)) {
+        rb_raise(rb_eArgError,
+                 "DCtx.new option keys must be Symbols (got %"PRIsVALUE")",
+                 rb_inspect(key));
+    }
+
     // Build the setter method name: key + "="
     const char* key_str = rb_id2name(SYM2ID(key));
     char setter[256];
@@ -313,6 +321,7 @@ typedef struct {
     size_t max_size;   // 0 = unlimited; otherwise output must not exceed this
     int error;
     int limit_exceeded;  // set if output would exceed max_size
+    int truncated;        // set if input was exhausted before the frame completed
     const char *error_name;
 } decompress_stream_nogvl_args;
 
@@ -324,6 +333,7 @@ decompress_stream_without_gvl(void* arg) {
     decompress_stream_nogvl_args* args = arg;
     args->error = 0;
     args->limit_exceeded = 0;
+    args->truncated = 0;
     args->error_name = NULL;
 
     args->dst_capacity = args->initial_capacity;
@@ -340,6 +350,7 @@ decompress_stream_without_gvl(void* arg) {
     args->dst_size = 0;
 
     ZSTD_inBuffer input = { args->src, args->src_size, 0 };
+    size_t last_ret = 1;  // sentinel: non-zero = frame not yet complete
 
     while (input.pos < input.size) {
         // Ensure we have room for output
@@ -378,12 +389,72 @@ decompress_stream_without_gvl(void* arg) {
         }
 
         args->dst_size += output.pos;
+        last_ret = ret;
 
         // ret == 0 means frame is complete
         if (ret == 0) break;
     }
 
+    // If we consumed all input but the last call still reported a non-zero hint
+    // (more input needed), the frame was cut short — flag it as truncated.
+    if (last_ret != 0) {
+        args->truncated = 1;
+    }
+
     return NULL;
+}
+
+// State for the rb_ensure-wrapped unknown-size decompression path.
+// Groups everything the body needs to run the no-GVL stream loop and everything
+// the cleanup needs to release on any exit (raise, async exception, success).
+typedef struct {
+    ZSTD_DCtx* dctx;
+    ZSTD_DDict* ddict;
+    decompress_stream_nogvl_args* args;
+    VALUE data;
+    size_t max_size;
+} dctx_stream_decompress_state;
+
+// Body: run the no-GVL stream loop (source string locked), check the outcome,
+// and build the result string. Raising here is safe: cleanup always runs.
+static VALUE
+vibe_zstd_dctx_stream_decompress_body(VALUE p) {
+    dctx_stream_decompress_state* state = (dctx_stream_decompress_state*)p;
+
+    // Lock the source string while the GVL is released: another Ruby thread
+    // holding the same string must not mutate or GC it mid-decompression.
+    vibe_zstd_nogvl_with_str_locked(decompress_stream_without_gvl, state->args, state->data);
+
+    if (state->args->limit_exceeded) {
+        rb_raise(rb_eDecompressedSizeExceeded,
+                 "Decompressed output exceeds limit of %zu bytes", state->max_size);
+    }
+
+    if (state->args->error) {
+        rb_raise(rb_eRuntimeError, "Decompression failed: %s", state->args->error_name);
+    }
+
+    if (state->args->truncated) {
+        rb_raise(rb_eRuntimeError, "Truncated frame: incomplete zstd data");
+    }
+
+    // Create Ruby string from the C buffer; cleanup frees the buffer
+    return rb_str_new(state->args->dst, state->args->dst_size);
+}
+
+// Cleanup: free the C output buffer and return the context to no-dictionary
+// mode so subsequent calls on this DCtx are not affected.
+static VALUE
+vibe_zstd_dctx_stream_decompress_cleanup(VALUE p) {
+    dctx_stream_decompress_state* state = (dctx_stream_decompress_state*)p;
+    if (state->args->dst) {
+        free(state->args->dst);
+        state->args->dst = NULL;
+    }
+    if (state->ddict) {
+        ZSTD_DCtx_refDDict(state->dctx, NULL);
+    }
+    return Qnil;
 }
 
 // DCtx frame_content_size - class method to get frame content size
@@ -559,30 +630,23 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
             .max_size = max_size,
             .error = 0,
             .limit_exceeded = 0,
+            .truncated = 0,
             .error_name = NULL
         };
 
-        rb_thread_call_without_gvl(decompress_stream_without_gvl, &stream_args, NULL, NULL);
-
-        // Return the context to no-dictionary mode so subsequent calls on this
-        // DCtx (e.g. decompressing a non-dictionary frame) are not affected.
-        if (ddict) ZSTD_DCtx_refDDict(dctx->dctx, NULL);
-
-        if (stream_args.limit_exceeded) {
-            if (stream_args.dst) free(stream_args.dst);
-            rb_raise(rb_eDecompressedSizeExceeded,
-                     "Decompressed output exceeds limit of %zu bytes", max_size);
-        }
-
-        if (stream_args.error) {
-            if (stream_args.dst) free(stream_args.dst);
-            rb_raise(rb_eRuntimeError, "Decompression failed: %s", stream_args.error_name);
-        }
-
-        // Create Ruby string from the C buffer, then free the C buffer
-        VALUE result = rb_str_new(stream_args.dst, stream_args.dst_size);
-        free(stream_args.dst);
-        return result;
+        // Run the streaming decompression and build the result under rb_ensure:
+        // the cleanup frees the C buffer and un-references the dictionary on
+        // every exit path, including the raises below and async exceptions
+        // delivered when the GVL is reacquired.
+        dctx_stream_decompress_state state = {
+            .dctx = dctx->dctx,
+            .ddict = ddict,
+            .args = &stream_args,
+            .data = data,
+            .max_size = max_size
+        };
+        return rb_ensure(vibe_zstd_dctx_stream_decompress_body, (VALUE)&state,
+                         vibe_zstd_dctx_stream_decompress_cleanup, (VALUE)&state);
     }
     // Reject a frame whose declared content size exceeds the limit before
     // allocating the output buffer (the header is attacker-controlled).
@@ -601,7 +665,11 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
         .dstCapacity = contentSize,
         .result = 0
     };
-    rb_thread_call_without_gvl(decompress_without_gvl, &args, NULL, NULL);
+    // Lock the source string while the GVL is released: another Ruby thread
+    // holding the same string must not mutate or GC it mid-decompression.
+    // The helper unlocks via rb_ensure so an async exception cannot leave
+    // the string permanently locked.
+    vibe_zstd_nogvl_with_str_locked(decompress_without_gvl, &args, data);
     if (ZSTD_isError(args.result)) {
         rb_raise(rb_eRuntimeError, "Decompression failed: %s", ZSTD_getErrorName(args.result));
     }

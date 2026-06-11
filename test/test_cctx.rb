@@ -969,4 +969,21 @@ class TestCCtx < Minitest::Test
 
     assert_equal data, VibeZstd::DCtx.new.decompress(with)
   end
+
+  # Regression: non-Symbol keyword keys must raise ArgumentError instead of
+  # crashing via SYM2ID on a non-Symbol VALUE (undefined behavior).
+  def test_non_symbol_keyword_key_raises_argument_error
+    assert_raises(ArgumentError) do
+      VibeZstd::CCtx.new(**{"level" => 3})
+    end
+  end
+
+  # Sanity check that compress still round-trips correctly after the
+  # rb_str_locktmp/rb_str_unlocktmp hardening added around GVL release.
+  def test_compress_round_trips_after_string_locking
+    cctx = VibeZstd::CCtx.new
+    data = "Round-trip sanity check after string locking hardening " * 20
+    compressed = cctx.compress(data)
+    assert_equal data, VibeZstd.decompress(compressed)
+  end
 end

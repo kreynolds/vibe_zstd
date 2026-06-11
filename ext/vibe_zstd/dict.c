@@ -125,13 +125,21 @@ dict_training_cleanup(VALUE arg) {
     return Qnil;
 }
 
-// Copy Ruby sample strings into contiguous C buffer for ZDICT functions
+// Copy Ruby sample strings into contiguous C buffer for ZDICT functions.
+// capacity is the total_samples_size measured during the validation pass.
+// If any sample has grown since validation (TOCTOU mutation), we raise rather
+// than overflow the buffer.
 static void
-copy_samples_to_buffer(dict_training_resources* resources, VALUE samples, long num_samples) {
+copy_samples_to_buffer(dict_training_resources* resources, VALUE samples, long num_samples,
+                       size_t capacity) {
     size_t offset = 0;
     for (long i = 0; i < num_samples; i++) {
         VALUE sample = rb_ary_entry(samples, i);
         size_t sample_len = RSTRING_LEN(sample);
+        // Guard against mutation between the validation pass and this copy.
+        if (sample_len > capacity - offset) {
+            rb_raise(rb_eRuntimeError, "sample mutated during dictionary training");
+        }
         resources->sample_sizes[i] = sample_len;
         memcpy(resources->samples_buffer + offset, RSTRING_PTR(sample), sample_len);
         offset += sample_len;
@@ -148,12 +156,14 @@ typedef struct {
     VALUE result;
     size_t max_dict_size;
     long num_samples;
-    VALUE samples;
+    size_t total_samples_size;  // measured during validation; passed to copy_samples_to_buffer
+    VALUE samples;              // private converted-samples array built during validation
 } dict_training_ctx;
 
 static VALUE train_dict_basic_body(VALUE arg) {
     dict_training_ctx* ctx = (dict_training_ctx*)arg;
-    copy_samples_to_buffer(ctx->resources, ctx->samples, ctx->num_samples);
+    copy_samples_to_buffer(ctx->resources, ctx->samples, ctx->num_samples,
+                           ctx->total_samples_size);
     size_t dict_size = ZDICT_trainFromBuffer(
         ctx->resources->dict_buffer, ctx->max_dict_size,
         ctx->resources->samples_buffer, ctx->resources->sample_sizes, (unsigned)ctx->num_samples
@@ -172,7 +182,8 @@ typedef struct {
 
 static VALUE train_dict_cover_body(VALUE arg) {
     train_dict_cover_ctx* ctx = (train_dict_cover_ctx*)arg;
-    copy_samples_to_buffer(ctx->base.resources, ctx->base.samples, ctx->base.num_samples);
+    copy_samples_to_buffer(ctx->base.resources, ctx->base.samples, ctx->base.num_samples,
+                           ctx->base.total_samples_size);
     size_t dict_size = ZDICT_trainFromBuffer_cover(
         ctx->base.resources->dict_buffer, ctx->base.max_dict_size,
         ctx->base.resources->samples_buffer, ctx->base.resources->sample_sizes, (unsigned)ctx->base.num_samples,
@@ -192,7 +203,8 @@ typedef struct {
 
 static VALUE train_dict_fast_cover_body(VALUE arg) {
     train_dict_fast_cover_ctx* ctx = (train_dict_fast_cover_ctx*)arg;
-    copy_samples_to_buffer(ctx->base.resources, ctx->base.samples, ctx->base.num_samples);
+    copy_samples_to_buffer(ctx->base.resources, ctx->base.samples, ctx->base.num_samples,
+                           ctx->base.total_samples_size);
     size_t dict_size = ZDICT_trainFromBuffer_fastCover(
         ctx->base.resources->dict_buffer, ctx->base.max_dict_size,
         ctx->base.resources->samples_buffer, ctx->base.resources->sample_sizes, (unsigned)ctx->base.num_samples,
@@ -213,7 +225,8 @@ typedef struct {
 
 static VALUE finalize_dict_body(VALUE arg) {
     finalize_dict_ctx* ctx = (finalize_dict_ctx*)arg;
-    copy_samples_to_buffer(ctx->base.resources, ctx->base.samples, ctx->base.num_samples);
+    copy_samples_to_buffer(ctx->base.resources, ctx->base.samples, ctx->base.num_samples,
+                           ctx->base.total_samples_size);
     size_t dict_size = ZDICT_finalizeDictionary(
         ctx->base.resources->dict_buffer, ctx->base.max_dict_size,
         RSTRING_PTR(ctx->content_val), RSTRING_LEN(ctx->content_val),
@@ -245,11 +258,17 @@ vibe_zstd_train_dict(int argc, VALUE* argv, VALUE self) {
         rb_raise(rb_eArgError, "samples array cannot be empty");
     }
 
-    // Validate all samples are strings and calculate sizes BEFORE allocating
+    // Validate all samples are strings and calculate sizes BEFORE allocating.
+    // Build a private converted-samples array so that StringValue conversions are
+    // retained: rb_ary_entry re-fetches the raw element, so storing the converted
+    // value here ensures copy_samples_to_buffer operates on real String objects
+    // rather than potentially-non-String objects that merely respond to to_str.
+    VALUE converted_samples = rb_ary_new_capa(num_samples);
     size_t total_samples_size = 0;
     for (long i = 0; i < num_samples; i++) {
         VALUE sample = rb_ary_entry(samples, i);
-        StringValue(sample);  // Validate type early - may raise TypeError
+        StringValue(sample);  // Validate type early - may raise TypeError; updates local
+        rb_ary_push(converted_samples, sample);
         total_samples_size += RSTRING_LEN(sample);
     }
 
@@ -274,7 +293,8 @@ vibe_zstd_train_dict(int argc, VALUE* argv, VALUE self) {
         .result = Qnil,
         .max_dict_size = max_dict_size,
         .num_samples = num_samples,
-        .samples = samples
+        .total_samples_size = total_samples_size,
+        .samples = converted_samples  // use private array, not caller's array
     };
 
     rb_ensure(train_dict_basic_body, (VALUE)&ctx, dict_training_cleanup, (VALUE)&resources);
@@ -298,11 +318,14 @@ vibe_zstd_train_dict_cover(int argc, VALUE* argv, VALUE self) {
         rb_raise(rb_eArgError, "samples array cannot be empty");
     }
 
-    // Validate all samples are strings and calculate sizes BEFORE allocating
+    // Validate all samples are strings and calculate sizes BEFORE allocating.
+    // Build a private converted-samples array (see vibe_zstd_train_dict for details).
+    VALUE converted_samples = rb_ary_new_capa(num_samples);
     size_t total_samples_size = 0;
     for (long i = 0; i < num_samples; i++) {
         VALUE sample = rb_ary_entry(samples, i);
-        StringValue(sample);  // Validate type early - may raise TypeError
+        StringValue(sample);  // Validate type early - may raise TypeError; updates local
+        rb_ary_push(converted_samples, sample);
         total_samples_size += RSTRING_LEN(sample);
     }
 
@@ -358,7 +381,8 @@ vibe_zstd_train_dict_cover(int argc, VALUE* argv, VALUE self) {
             .result = Qnil,
             .max_dict_size = max_dict_size,
             .num_samples = num_samples,
-            .samples = samples
+            .total_samples_size = total_samples_size,
+            .samples = converted_samples  // use private array, not caller's array
         },
         .params = params
     };
@@ -384,11 +408,14 @@ vibe_zstd_train_dict_fast_cover(int argc, VALUE* argv, VALUE self) {
         rb_raise(rb_eArgError, "samples array cannot be empty");
     }
 
-    // Validate all samples are strings and calculate sizes BEFORE allocating
+    // Validate all samples are strings and calculate sizes BEFORE allocating.
+    // Build a private converted-samples array (see vibe_zstd_train_dict for details).
+    VALUE converted_samples = rb_ary_new_capa(num_samples);
     size_t total_samples_size = 0;
     for (long i = 0; i < num_samples; i++) {
         VALUE sample = rb_ary_entry(samples, i);
-        StringValue(sample);  // Validate type early - may raise TypeError
+        StringValue(sample);  // Validate type early - may raise TypeError; updates local
+        rb_ary_push(converted_samples, sample);
         total_samples_size += RSTRING_LEN(sample);
     }
 
@@ -447,7 +474,8 @@ vibe_zstd_train_dict_fast_cover(int argc, VALUE* argv, VALUE self) {
             .result = Qnil,
             .max_dict_size = max_dict_size,
             .num_samples = num_samples,
-            .samples = samples
+            .total_samples_size = total_samples_size,
+            .samples = converted_samples  // use private array, not caller's array
         },
         .params = params
     };
@@ -514,11 +542,14 @@ vibe_zstd_finalize_dictionary(int argc, VALUE* argv, VALUE self) {
         rb_raise(rb_eArgError, "samples array cannot be empty");
     }
 
-    // Validate all samples are strings and calculate sizes BEFORE allocating
+    // Validate all samples are strings and calculate sizes BEFORE allocating.
+    // Build a private converted-samples array (see vibe_zstd_train_dict for details).
+    VALUE converted_samples = rb_ary_new_capa(num_samples);
     size_t total_samples_size = 0;
     for (long i = 0; i < num_samples; i++) {
         VALUE sample = rb_ary_entry(samples_val, i);
-        StringValue(sample);  // Validate type early - may raise TypeError
+        StringValue(sample);  // Validate type early - may raise TypeError; updates local
+        rb_ary_push(converted_samples, sample);
         total_samples_size += RSTRING_LEN(sample);
     }
 
@@ -546,7 +577,8 @@ vibe_zstd_finalize_dictionary(int argc, VALUE* argv, VALUE self) {
             .result = Qnil,
             .max_dict_size = max_size,
             .num_samples = num_samples,
-            .samples = samples_val
+            .total_samples_size = total_samples_size,
+            .samples = converted_samples  // use private array, not caller's array
         },
         .content_val = content_val,
         .params = params

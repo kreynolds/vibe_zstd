@@ -221,4 +221,56 @@ class TestDict < Minitest::Test
     assert(ddict_large.size > ddict_small.size,
       "Larger dictionary should have larger size")
   end
+
+  # Regression: samples that respond to to_str (but are not Strings) must be
+  # accepted and produce a valid dictionary.  Previously StringValue(sample)
+  # updated only the C local, so copy_samples_to_buffer re-fetched the raw
+  # non-String element and called RSTRING_PTR on it → memory corruption/segfault.
+  def test_train_dict_with_to_str_samples
+    # Build a custom object whose to_str returns a real String.
+    to_str_obj = Object.new
+    base = "sample data with repeated patterns for dictionary training " * 3
+    to_str_obj.define_singleton_method(:to_str) { base.dup }
+
+    # Mix it in with plain Strings so we have enough varied samples.
+    samples = Array.new(50) { |i| "sample #{i} with common pattern " * 4 }
+    samples[10] = to_str_obj
+
+    # Must not crash; must return a String (the trained dictionary).
+    result = VibeZstd.train_dict(samples, max_dict_size: 2048)
+    assert_instance_of(String, result)
+    assert(result.bytesize > 0)
+  end
+
+  # Regression: a malicious to_str that mutates another sample in the array
+  # must not cause a heap overflow.  The fix records converted Strings in a
+  # private array during validation, so later mutation of the caller's array
+  # is invisible to copy_samples_to_buffer.  Any size mismatch detected at
+  # copy time raises RuntimeError.  Either outcome (clean success on the
+  # originally-converted data, or RuntimeError) is acceptable; a crash is not.
+  def test_train_dict_with_mutating_to_str_samples
+    samples = Array.new(50) { |i| "sample #{i} with common pattern " * 4 }
+
+    # This object's to_str side-effects samples[0] by appending 1 MB to it,
+    # making total_samples_size stale if copy_samples_to_buffer sees the
+    # grown string.  With the fix, samples[0] in the private converted array
+    # still holds the original (short) string captured during validation.
+    mutator = Object.new
+    mutator.define_singleton_method(:to_str) do
+      samples[0] = samples[0] + ("x" * (1024 * 1024))
+      "mutator sample with common pattern " * 4
+    end
+    samples[25] = mutator
+
+    begin
+      result = VibeZstd.train_dict(samples, max_dict_size: 2048)
+      # If training succeeds it must return a String (trained on converted data).
+      assert_instance_of(String, result)
+    rescue RuntimeError, ArgumentError
+      # A clean Ruby error is also acceptable (e.g. if ZDICT rejects the data).
+      pass
+    end
+    # The key assertion is implicit: reaching this line without a crash means
+    # no heap overflow occurred.
+  end
 end

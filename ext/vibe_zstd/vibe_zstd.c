@@ -280,6 +280,35 @@ vibe_zstd_default_c_level(VALUE self) {
     return INT2NUM(ZSTD_defaultCLevel());
 }
 
+// Run func(arg) without the GVL while str is locked against mutation.
+// rb_thread_call_without_gvl can deliver a pending async exception (e.g.
+// Thread#raise, Timeout) after reacquiring the GVL, so the unlock must go
+// through rb_ensure or the string would be left permanently locked.
+typedef struct {
+    void* (*func)(void*);
+    void* arg;
+} nogvl_locked_call;
+
+static VALUE
+nogvl_locked_body(VALUE p) {
+    nogvl_locked_call* call = (nogvl_locked_call*)p;
+    rb_thread_call_without_gvl(call->func, call->arg, NULL, NULL);
+    return Qnil;
+}
+
+static VALUE
+nogvl_locked_unlock(VALUE str) {
+    rb_str_unlocktmp(str);
+    return Qnil;
+}
+
+static void
+vibe_zstd_nogvl_with_str_locked(void* (*func)(void*), void* arg, VALUE str) {
+    nogvl_locked_call call = { func, arg };
+    rb_str_locktmp(str);
+    rb_ensure(nogvl_locked_body, (VALUE)&call, nogvl_locked_unlock, str);
+}
+
 // Include the split implementation files
 #include "cctx.c"
 #include "dctx.c"
