@@ -588,4 +588,146 @@ class TestStreaming < Minitest::Test
     decompressed = chunks.join
     assert_equal(data, decompressed)
   end
+
+  # ------------------------------------------------------------------ #
+  # Regression tests for security/correctness fixes                     #
+  # ------------------------------------------------------------------ #
+
+  # Fix 1a: CompressWriter with an unreferenced CDict must survive GC
+  def test_compress_writer_unreferenced_cdict_survives_gc
+    dict_data = "hello world! " * 20
+    data = "hello world! " * 100
+    output = StringIO.new
+
+    # Pass a freshly-constructed CDict inline so the caller holds no local ref.
+    # The writer must intern the dict or GC.compact / GC.start will free it.
+    writer = VibeZstd::CompressWriter.new(output, dict: VibeZstd::CDict.new(dict_data, 3))
+    GC.start
+    GC.compact if GC.respond_to?(:compact)
+    writer.write(data)
+    writer.finish
+
+    compressed = output.string
+    ddict = VibeZstd::DDict.new(dict_data)
+    input = StringIO.new(compressed)
+    reader = VibeZstd::DecompressReader.new(input, dict: ddict)
+    assert_equal(data, reader.read)
+  end
+
+  # Fix 1b: DecompressReader with an unreferenced DDict must survive GC
+  def test_decompress_reader_unreferenced_ddict_survives_gc
+    dict_data = "hello world! " * 20
+    data = "hello world! " * 100
+
+    cdict = VibeZstd::CDict.new(dict_data, 3)
+    compressed = VibeZstd.compress(data, dict: cdict)
+
+    # Pass a freshly-constructed DDict inline with no caller-held reference.
+    input = StringIO.new(compressed)
+    reader = VibeZstd::DecompressReader.new(input, dict: VibeZstd::DDict.new(dict_data))
+    GC.start
+    GC.compact if GC.respond_to?(:compact)
+    assert_equal(data, reader.read)
+  end
+
+  # Fix 4a: read(0) must return "" and must NOT set eof or advance stream state
+  def test_read_zero_returns_empty_string_without_setting_eof
+    data = "hello world"
+    compressed = VibeZstd.compress(data)
+
+    input = StringIO.new(compressed)
+    reader = VibeZstd::DecompressReader.new(input)
+
+    # read(0) should return "" immediately, not nil
+    result = reader.read(0)
+    assert_equal("", result, "read(0) should return empty string")
+    refute(reader.eof?, "read(0) must not set eof")
+
+    # Stream state must be untouched: normal read still returns full data
+    assert_equal(data, reader.read)
+  end
+
+  # Fix 4b: large size argument on a small stream must not pre-allocate hugely
+  # and must return correct data (functional correctness, not allocation check)
+  def test_large_read_size_on_small_stream_returns_correct_data
+    data = "small payload"
+    compressed = VibeZstd.compress(data)
+
+    input = StringIO.new(compressed)
+    reader = VibeZstd::DecompressReader.new(input)
+
+    # 10 MB requested, but stream holds only ~13 bytes of decompressed data.
+    # Must not raise, must not return garbage, and must return all the data.
+    result = reader.read(10_000_000)
+    assert_equal(data, result)
+    # After consuming the stream, next read must signal EOF
+    assert_nil(reader.read(10_000_000))
+  end
+
+  # Fix 3: an IO that reuses the same buffer string across reads must still decompress correctly.
+  # This simulates IOs (e.g. custom buffered readers) that return the same String object
+  # each time, overwriting its content before the next read call.  The reader must snapshot
+  # the buffer (via rb_str_new_frozen) so that dstream->input.src is not corrupted when
+  # the IO overwrites the buffer on a subsequent call.
+  def test_decompress_reader_with_reused_buffer_io
+    data = "hello world! " * 500
+    compressed = VibeZstd.compress(data)
+
+    # IO that always returns the same mutable String object, overwriting its
+    # content on every call — a common pattern in buffered/zero-copy IO layers.
+    reuse_io = Object.new
+    pos = 0
+    shared_buf = +""
+    reuse_io.define_singleton_method(:read) do |n|
+      remaining = compressed.bytesize - pos
+      return nil if remaining == 0
+
+      read_size = [n, remaining].min
+      # Fill the shared buffer with the next chunk and return it
+      shared_buf.replace(compressed[pos, read_size])
+      pos += read_size
+      shared_buf  # return the same object every time
+    end
+
+    reader = VibeZstd::DecompressReader.new(reuse_io)
+    chunks = []
+    while (chunk = reader.read(1024))
+      chunks << chunk
+    end
+
+    assert_equal(data, chunks.join, "Decompression must be correct despite IO buffer reuse")
+  end
+
+  # An IO whose read returns a non-String (and non-nil) must raise TypeError,
+  # not crash the VM. Objects responding to to_str are converted.
+  def test_decompress_reader_with_non_string_read_result
+    bad_io = Object.new
+    bad_io.define_singleton_method(:read) { |_n| 42 }
+
+    reader = VibeZstd::DecompressReader.new(bad_io)
+    assert_raises(TypeError) { reader.read }
+  end
+
+  def test_decompress_reader_with_to_str_read_result
+    data = "convertible chunk data " * 100
+    compressed = VibeZstd.compress(data)
+
+    # IO returning an object that is not a String but converts via to_str
+    wrapper_io = Object.new
+    pos = 0
+    wrapper_io.define_singleton_method(:read) do |n|
+      remaining = compressed.bytesize - pos
+      return nil if remaining == 0
+
+      read_size = [n, remaining].min
+      slice = compressed[pos, read_size]
+      pos += read_size
+      wrapper = Object.new
+      wrapper.define_singleton_method(:to_str) { slice }
+      wrapper
+    end
+
+    reader = VibeZstd::DecompressReader.new(wrapper_io)
+    assert_equal(data, reader.read_all)
+  end
 end

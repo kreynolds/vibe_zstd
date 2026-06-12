@@ -1038,4 +1038,47 @@ class TestVibeZstd < Minitest::Test
     # Clean up
     VibeZstd::ThreadLocal.clear_thread_cache!
   end
+
+  def test_thread_local_compress_decompress_round_trip_and_context_reuse
+    VibeZstd::ThreadLocal.clear_thread_cache!
+
+    data = "Round-trip data for thread-local pool regression"
+
+    # First compress call creates a context
+    compressed1 = VibeZstd::ThreadLocal.compress(data)
+    assert_equal(data, VibeZstd::ThreadLocal.decompress(compressed1))
+
+    # Second compress call must reuse the same context (pool size stays at 1)
+    compressed2 = VibeZstd::ThreadLocal.compress(data)
+    assert_equal(data, VibeZstd::ThreadLocal.decompress(compressed2))
+
+    stats = VibeZstd::ThreadLocal.thread_cache_stats
+    assert_equal(1, stats[:compression_contexts],
+      "expected exactly one reused CCtx after two compress calls")
+    assert_equal([:default], stats[:compression_keys])
+
+    VibeZstd::ThreadLocal.clear_thread_cache!
+  end
+
+  def test_decompress_reader_gets_with_multi_char_separator
+    require "stringio"
+
+    original = "a||b||c"
+    buf = StringIO.new(+"", "w+b")
+
+    VibeZstd::CompressWriter.open(buf) do |w|
+      w.write(original)
+    end
+
+    buf.rewind
+    reader = VibeZstd::DecompressReader.new(buf)
+
+    pieces = []
+    while (line = reader.gets("||"))
+      pieces << line
+    end
+
+    assert_equal(["a||", "b||", "c"], pieces,
+      "gets with '||' separator should split the stream into three pieces")
+  end
 end

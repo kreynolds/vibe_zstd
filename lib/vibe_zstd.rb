@@ -103,6 +103,10 @@ module VibeZstd
   # Memory footprint: ~128KB per DCtx × unique dictionaries × threads
   # Example: 3 dicts × 5 Puma threads = 1.9MB total
   #
+  # Storage: uses Thread#thread_variable_get/set (true thread-local) so that
+  # fiber-based servers (Falcon, async) share one pool per OS thread rather
+  # than allocating a fresh pool for every fiber.
+  #
   # Note: Only supports per-operation parameters (level, dict, pledged_size, initial_capacity)
   # Does NOT support context-level settings (nb_workers, checksum_flag, etc.)
   module ThreadLocal
@@ -118,9 +122,10 @@ module VibeZstd
       # Key by dictionary ID, or :default if no dict
       key = dict ? dict.dict_id : :default
 
-      # Get or create thread-local context pool
-      Thread.current[:vibe_zstd_cctx_pool] ||= {}
-      cctx = Thread.current[:vibe_zstd_cctx_pool][key] ||= VibeZstd::CCtx.new
+      # Get or create thread-local context pool (true thread-local, not fiber-local)
+      pool = Thread.current.thread_variable_get(:vibe_zstd_cctx_pool) || {}
+      cctx = pool[key] ||= VibeZstd::CCtx.new
+      Thread.current.thread_variable_set(:vibe_zstd_cctx_pool, pool)
 
       # Build options hash
       options = {}
@@ -142,9 +147,10 @@ module VibeZstd
     def self.decompress(data, dict: nil, initial_capacity: nil, max_decompressed_size: nil)
       key = dict ? dict.dict_id : :default
 
-      # Get or create thread-local context pool
-      Thread.current[:vibe_zstd_dctx_pool] ||= {}
-      dctx = Thread.current[:vibe_zstd_dctx_pool][key] ||= VibeZstd::DCtx.new
+      # Get or create thread-local context pool (true thread-local, not fiber-local)
+      pool = Thread.current.thread_variable_get(:vibe_zstd_dctx_pool) || {}
+      dctx = pool[key] ||= VibeZstd::DCtx.new
+      Thread.current.thread_variable_set(:vibe_zstd_dctx_pool, pool)
 
       # Build options hash
       options = {}
@@ -159,19 +165,21 @@ module VibeZstd
     # Clear all thread-local context pools for the current thread
     # Useful for testing or explicit memory management
     def self.clear_thread_cache!
-      Thread.current[:vibe_zstd_cctx_pool] = {}
-      Thread.current[:vibe_zstd_dctx_pool] = {}
+      Thread.current.thread_variable_set(:vibe_zstd_cctx_pool, {})
+      Thread.current.thread_variable_set(:vibe_zstd_dctx_pool, {})
       nil
     end
 
     # Get statistics about the current thread's context pools
     # @return [Hash] Pool statistics
     def self.thread_cache_stats
+      cctx_pool = Thread.current.thread_variable_get(:vibe_zstd_cctx_pool)
+      dctx_pool = Thread.current.thread_variable_get(:vibe_zstd_dctx_pool)
       {
-        compression_contexts: Thread.current[:vibe_zstd_cctx_pool]&.size || 0,
-        decompression_contexts: Thread.current[:vibe_zstd_dctx_pool]&.size || 0,
-        compression_keys: Thread.current[:vibe_zstd_cctx_pool]&.keys || [],
-        decompression_keys: Thread.current[:vibe_zstd_dctx_pool]&.keys || []
+        compression_contexts: cctx_pool&.size || 0,
+        decompression_contexts: dctx_pool&.size || 0,
+        compression_keys: cctx_pool&.keys || [],
+        decompression_keys: dctx_pool&.keys || []
       }
     end
   end
@@ -246,7 +254,7 @@ module VibeZstd
       loop do
         # Check buffer for separator
         if (idx = @line_buffer.index(sep))
-          return @line_buffer.slice!(0, idx + sep.bytesize)
+          return @line_buffer.slice!(0, idx + sep.length)
         end
 
         # Read more data in larger chunks
@@ -257,7 +265,7 @@ module VibeZstd
       end
 
       # Return remaining buffer or nil
-      @line_buffer.empty? ? nil : @line_buffer.slice!(0, @line_buffer.bytesize)
+      @line_buffer.empty? ? nil : @line_buffer.slice!(0, @line_buffer.length)
     end
 
     # Iterate over lines

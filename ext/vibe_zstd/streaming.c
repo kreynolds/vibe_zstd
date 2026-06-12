@@ -14,6 +14,12 @@ static VALUE vibe_zstd_reader_initialize(int argc, VALUE *argv, VALUE self);
 static VALUE vibe_zstd_reader_read(int argc, VALUE *argv, VALUE self);
 static VALUE vibe_zstd_reader_eof(VALUE self);
 
+// State struct for rb_ensure-based string lock/unlock in vibe_zstd_writer_write
+typedef struct {
+    vibe_zstd_cstream* cstream;
+    VALUE data;
+} vibe_zstd_write_state;
+
 // TypedData types - defined in vibe_zstd.c
 extern rb_data_type_t vibe_zstd_cstream_type;
 extern rb_data_type_t vibe_zstd_dstream_type;
@@ -89,6 +95,9 @@ vibe_zstd_writer_initialize(int argc, VALUE *argv, VALUE self) {
         if (ZSTD_isError(result)) {
             rb_raise(rb_eRuntimeError, "Failed to set dictionary: %s", ZSTD_getErrorName(result));
         }
+        // Retain the CDict object so GC won't free it while the stream holds a raw
+        // pointer to its internal ZSTD_CDict (ZSTD_CCtx_refCDict stores no Ruby ref)
+        rb_ivar_set(self, rb_intern("@dict"), dict);
     }
 
     // Allocate reusable output buffer (write barrier for WB_PROTECTED)
@@ -97,14 +106,16 @@ vibe_zstd_writer_initialize(int argc, VALUE *argv, VALUE self) {
     return self;
 }
 
+// Body of the rb_ensure wrapper: runs the compress loop with data locked
 static VALUE
-vibe_zstd_writer_write(VALUE self, VALUE data) {
-    Check_Type(data, T_STRING);
+vibe_zstd_writer_write_body(VALUE arg) {
+    vibe_zstd_write_state* state = (vibe_zstd_write_state*)arg;
+    vibe_zstd_cstream* cstream = state->cstream;
+    VALUE data = state->data;
 
-    vibe_zstd_cstream* cstream;
-    TypedData_Get_Struct(self, vibe_zstd_cstream, &vibe_zstd_cstream_type, cstream);
-
-    // Input buffer: pos advances as ZSTD consumes data
+    // Input buffer: pos advances as ZSTD consumes data.
+    // data is locked (rb_str_locktmp) for the duration of this call so that
+    // RSTRING_PTR remains valid even when rb_funcall runs arbitrary Ruby code.
     ZSTD_inBuffer input = {
         .src = RSTRING_PTR(data),
         .size = RSTRING_LEN(data),
@@ -137,9 +148,38 @@ vibe_zstd_writer_write(VALUE self, VALUE data) {
         // Write any compressed output that was produced
         if (output.pos > 0) {
             rb_str_set_len(outBuffer, output.pos);
+            // rb_funcall may run arbitrary Ruby code, but input.src stays valid
+            // because data is locked against mutation/reallocation
             rb_funcall(cstream->io, id_write, 1, outBuffer);
         }
     }
+
+    return Qnil;
+}
+
+// Ensure function: always unlocks data regardless of raise/return
+static VALUE
+vibe_zstd_writer_write_unlock(VALUE arg) {
+    rb_str_unlocktmp((VALUE)arg);
+    return Qnil;
+}
+
+static VALUE
+vibe_zstd_writer_write(VALUE self, VALUE data) {
+    Check_Type(data, T_STRING);
+
+    vibe_zstd_cstream* cstream;
+    TypedData_Get_Struct(self, vibe_zstd_cstream, &vibe_zstd_cstream_type, cstream);
+
+    // Lock data for the duration of the compress loop so that RSTRING_PTR(data)
+    // stays valid even when io.write (called inside the loop) runs Ruby code that
+    // could otherwise mutate or resize the string.  rb_str_locktmp raises if the
+    // string is already locked; the ensure always unlocks it.
+    rb_str_locktmp(data);
+
+    vibe_zstd_write_state state = { cstream, data };
+    rb_ensure(vibe_zstd_writer_write_body, (VALUE)&state,
+              vibe_zstd_writer_write_unlock, data);
 
     return self;
 }
@@ -275,6 +315,9 @@ vibe_zstd_reader_initialize(int argc, VALUE *argv, VALUE self) {
         if (ZSTD_isError(result)) {
             rb_raise(rb_eRuntimeError, "Failed to set dictionary: %s", ZSTD_getErrorName(result));
         }
+        // Retain the DDict object so GC won't free it while the stream holds a raw
+        // pointer to its internal ZSTD_DDict (ZSTD_DCtx_refDDict stores no Ruby ref)
+        rb_ivar_set(self, rb_intern("@dict"), dict);
     }
 
     // Initialize input buffer management
@@ -298,10 +341,18 @@ vibe_zstd_reader_initialize(int argc, VALUE *argv, VALUE self) {
 // - Maintains internal compressed input buffer that refills from IO as needed
 // - Calls ZSTD_decompressStream incrementally to produce output
 // - Tracks EOF state based on IO exhaustion and frame completion
+// - Input chunks are stored as frozen copies so that IOs which mutate/reuse
+//   the returned string cannot invalidate dstream->input.src between calls
 //
 // EOF handling:
 // - Returns nil when no more data available
 // - Sets eof flag when: IO returns nil, frame complete (ret==0), or no progress made
+// - read(0) always returns "" immediately without touching stream state
+//
+// Allocation strategy:
+// - Initial buffer is capped at ZSTD_DStreamOutSize() to avoid gigabyte
+//   allocations for large size arguments on small streams
+// - Buffer grows geometrically (doubling) up to requested_size as needed
 //
 // This implements proper streaming semantics for incremental decompression
 // of arbitrarily large files without loading everything into memory.
@@ -313,6 +364,11 @@ vibe_zstd_reader_read(int argc, VALUE *argv, VALUE self) {
     vibe_zstd_dstream* dstream;
     TypedData_Get_Struct(self, vibe_zstd_dstream, &vibe_zstd_dstream_type, dstream);
 
+    // read(0): per IO semantics, always return "" without touching stream state
+    if (!NIL_P(size_arg) && NUM2SIZET(size_arg) == 0) {
+        return rb_str_new(NULL, 0);
+    }
+
     if (dstream->eof) {
         return Qnil;
     }
@@ -323,8 +379,12 @@ vibe_zstd_reader_read(int argc, VALUE *argv, VALUE self) {
     size_t requested_size = NIL_P(size_arg) ? default_chunk_size : NUM2SIZET(size_arg);
     size_t inBufferSize = ZSTD_DStreamInSize();
 
-    // Preallocate buffer for requested size
-    VALUE result = rb_str_buf_new(requested_size);
+    // Cap the initial allocation to avoid multi-gigabyte pre-allocations when
+    // the caller passes a huge size argument for a small stream.  The buffer
+    // grows geometrically below as output accumulates.
+    size_t default_out_size = ZSTD_DStreamOutSize();
+    size_t initial_alloc = (requested_size < default_out_size) ? requested_size : default_out_size;
+    VALUE result = rb_str_buf_new((long)initial_alloc);
 
     size_t total_read = 0;
     int made_progress = 0;
@@ -341,10 +401,21 @@ vibe_zstd_reader_read(int argc, VALUE *argv, VALUE self) {
                 break;
             }
 
+            // The IO is duck-typed: read may return anything. Convert via to_str
+            // (raising TypeError otherwise) so RSTRING below never sees a non-String.
+            StringValue(chunk);
+
+            // Store a private frozen copy so that an IO that reuses/mutates its
+            // returned buffer string cannot invalidate dstream->input.src between
+            // successive read() calls.  rb_str_new_frozen is cheap (copy-on-write
+            // snapshot) when the string is already frozen, and allocates a
+            // separate copy otherwise.
+            VALUE frozen_chunk = rb_str_new_frozen(chunk);
+
             // Reset input buffer with new data (write barrier for WB_PROTECTED)
-            RB_OBJ_WRITE(self, &dstream->input_data, chunk);
-            dstream->input.src = RSTRING_PTR(chunk);
-            dstream->input.size = RSTRING_LEN(chunk);
+            RB_OBJ_WRITE(self, &dstream->input_data, frozen_chunk);
+            dstream->input.src = RSTRING_PTR(frozen_chunk);
+            dstream->input.size = RSTRING_LEN(frozen_chunk);
             dstream->input.pos = 0;
         }
 
@@ -353,7 +424,22 @@ vibe_zstd_reader_read(int argc, VALUE *argv, VALUE self) {
             break;
         }
 
-        size_t space_left = requested_size - total_read;
+        // Grow the output buffer geometrically when it is full, capped at
+        // requested_size.  We must recompute RSTRING_PTR after any resize
+        // because the backing allocation may move.
+        size_t current_capacity = (size_t)rb_str_capacity(result);
+        if (total_read >= current_capacity) {
+            size_t new_capacity = current_capacity * 2;
+            if (new_capacity > requested_size) new_capacity = requested_size;
+            rb_str_resize(result, (long)new_capacity);
+        }
+
+        // Cap space_left at (requested_size - total_read) to ensure read(n) never
+        // returns more than n bytes: rb_str_capacity may exceed the requested size
+        // due to malloc's internal size-class rounding (e.g. request 100, get 135).
+        size_t effective_capacity = (size_t)rb_str_capacity(result);
+        if (effective_capacity > requested_size) effective_capacity = requested_size;
+        size_t space_left = effective_capacity - total_read;
 
         ZSTD_outBuffer output = {
             .dst = RSTRING_PTR(result) + total_read,

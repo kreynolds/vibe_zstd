@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-06-11
+
+### Security
+- Fixed use-after-free: `CompressWriter` and `DecompressReader` now retain their dictionary object. Previously only the raw `ZSTD_CDict*`/`ZSTD_DDict*` pointer was stored, so a dictionary passed as `dict:` without the caller holding their own reference could be garbage-collected while the stream still used it.
+- `DCtx#decompress` now raises `RuntimeError` ("Truncated frame") when an unknown-content-size frame ends mid-stream, instead of silently returning partial output. The known-size path already rejected truncated input; the streaming path now matches.
+- Dictionary training (`train_dict`, `train_dict_cover`, `train_dict_fast_cover`, `finalize_dictionary`) no longer crashes or risks a heap overflow when samples are non-String objects responding to `to_str`, or when a malicious `to_str` mutates other samples mid-validation. Converted samples are retained and the copy is capacity-checked.
+- Source strings are now locked (`rb_str_locktmp`) while the GVL is released during `CCtx#compress`, `DCtx#decompress`, and across `CompressWriter#write`'s IO calls, preventing a use-after-free read if another thread (or re-entrant IO code) mutates the string mid-operation. Unlocking is async-exception-safe via `rb_ensure`.
+- `DecompressReader` snapshots each input chunk (`rb_str_new_frozen`), so IOs that reuse/mutate the buffer string they return can no longer invalidate the decoder's input pointer between reads.
+- `DecompressReader#read` raises `TypeError` when the underlying IO's `read` returns a non-String (non-`to_str`-able) object, instead of crashing the VM.
+- `CCtx.new` / `DCtx.new` raise `ArgumentError` on non-Symbol keyword keys (e.g. `CCtx.new("level" => 3)`) instead of hitting undefined behavior.
+
+### Fixed
+- `DCtx#decompress` (unknown-size path): the C output buffer and per-call dictionary reference are now released via `rb_ensure` on every exit path, so an async exception (e.g. `Timeout`) can no longer leak the buffer or leave the dictionary referenced on the context.
+- `DecompressReader#read(0)` returns `""` without latching EOF, matching IO semantics. Previously it returned `nil` and marked the stream finished.
+- `DecompressReader#gets` no longer mixes character indexes with byte sizes, fixing line splitting with multibyte separators.
+- Build: added `ext/vibe_zstd/depend` so editing the split implementation files (`cctx.c`, `dctx.c`, `dict.c`, `streaming.c`, `frames.c`) or project headers triggers recompilation of the extension.
+
+### Changed
+- `DecompressReader#read(n)` caps its initial allocation (~128KB) and grows geometrically up to `n`, instead of preallocating the full requested size up front (`read(1_000_000_000)` on a small stream no longer allocates 1GB).
+- `VibeZstd::ThreadLocal` uses true thread-local storage (`Thread#thread_variable_get/set`) instead of fiber-local `Thread.current[]`, so fiber-based servers (Falcon, async) reuse one context pool per OS thread rather than churning a fresh pool per fiber.
+- README: prominent warning recommending `max_decompressed_size` when decompressing untrusted input.
+
 ## [1.2.0] - 2026-06-06
 
 ### Added

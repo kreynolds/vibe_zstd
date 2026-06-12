@@ -7,6 +7,11 @@ extern rb_data_type_t vibe_zstd_cctx_type;
 // Helper to set CCtx parameter from Ruby keyword argument
 static int
 vibe_zstd_cctx_init_param_iter(VALUE key, VALUE value, VALUE self) {
+    // Reject non-Symbol keys early; SYM2ID on a non-Symbol is undefined behavior.
+    if (!SYMBOL_P(key)) {
+        rb_raise(rb_eArgError, "keyword key must be a Symbol, got %"PRIsVALUE, rb_inspect(key));
+    }
+
     // Build the setter method name: key + "="
     const char* key_str = rb_id2name(SYM2ID(key));
     char setter[256];
@@ -164,7 +169,13 @@ vibe_zstd_cctx_compress(int argc, VALUE* argv, VALUE self) {
         .dstCapacity = dstCapacity,
         .result = 0
     };
-    rb_thread_call_without_gvl(compress_without_gvl, &args, NULL, NULL);
+    // Lock the source string for the duration of the GVL-released compression.
+    // Without this, another Ruby thread holding the same String object could
+    // modify or reallocate it while compression reads from its buffer, causing
+    // a use-after-free read.  The helper unlocks via rb_ensure so the string
+    // is never left permanently locked, even if an async exception (e.g.
+    // Timeout, Thread#raise) is delivered when the GVL is reacquired.
+    vibe_zstd_nogvl_with_str_locked(compress_without_gvl, &args, data);
 
     // Restore context state so repeated one-shot calls remain independent.
     if (cdict) ZSTD_CCtx_refCDict(cctx->cctx, NULL);
