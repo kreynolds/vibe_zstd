@@ -174,10 +174,15 @@ vibe_zstd_writer_write(VALUE self, VALUE data) {
     // Lock data for the duration of the compress loop so that RSTRING_PTR(data)
     // stays valid even when io.write (called inside the loop) runs Ruby code that
     // could otherwise mutate or resize the string.  rb_str_locktmp raises if the
-    // string is already locked; the ensure always unlocks it.
-    rb_str_locktmp(data);
-
+    // string is already locked; the ensure always unlocks it.  Frozen strings
+    // are already immutable and Ruby 4.0+ refuses to lock them, so skip it.
     vibe_zstd_write_state state = { cstream, data };
+    if (OBJ_FROZEN(data)) {
+        vibe_zstd_writer_write_body((VALUE)&state);
+        return self;
+    }
+
+    rb_str_locktmp(data);
     rb_ensure(vibe_zstd_writer_write_body, (VALUE)&state,
               vibe_zstd_writer_write_unlock, data);
 

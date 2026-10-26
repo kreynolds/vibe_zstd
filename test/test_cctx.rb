@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "stringio"
 
 class TestCCtx < Minitest::Test
   # Basic construction and compression
@@ -985,5 +986,27 @@ class TestCCtx < Minitest::Test
     data = "Round-trip sanity check after string locking hardening " * 20
     compressed = cctx.compress(data)
     assert_equal data, VibeZstd.decompress(compressed)
+  end
+
+  # Ruby 4.0+ raises FrozenError from rb_str_locktmp on frozen strings, so
+  # frozen input must skip locking. Frozen and unfrozen inputs both work, and
+  # an unfrozen string is left unlocked (mutable) afterwards.
+  def test_frozen_and_unfrozen_inputs_round_trip
+    frozen = ("frozen input " * 50).freeze
+    unfrozen = +"unfrozen input " * 50
+
+    [frozen, unfrozen].each do |data|
+      compressed = VibeZstd::CCtx.new.compress(data)
+      assert_equal data, VibeZstd::DCtx.new.decompress(compressed.freeze)
+
+      io = StringIO.new
+      writer = VibeZstd::CompressWriter.new(io)
+      writer.write(data)
+      writer.finish
+      assert_equal data, VibeZstd.decompress(io.string)
+    end
+
+    unfrozen << "still mutable"
+    assert unfrozen.end_with?("still mutable")
   end
 end

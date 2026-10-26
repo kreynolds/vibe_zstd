@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-26
+
+### Fixed
+- Ruby 4.0 compatibility: `CCtx#compress`, `DCtx#decompress`, `VibeZstd.compress`/`.decompress`, and `CompressWriter#write` raised `FrozenError` when given a frozen string (including `# frozen_string_literal: true` literals). Ruby 4.0 refuses `rb_str_locktmp` on frozen strings; frozen input is already immutable, so the GVL-release lock added in 1.3.0 is now skipped for it. Unfrozen strings are still locked as before.
+
 ## [1.3.0] - 2026-06-11
 
 ### Security
