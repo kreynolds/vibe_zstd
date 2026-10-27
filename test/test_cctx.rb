@@ -988,9 +988,8 @@ class TestCCtx < Minitest::Test
     assert_equal data, VibeZstd.decompress(compressed)
   end
 
-  # Ruby 4.0+ raises FrozenError from rb_str_locktmp on frozen strings, so
-  # frozen input must skip locking. Frozen and unfrozen inputs both work, and
-  # an unfrozen string is left unlocked (mutable) afterwards.
+  # Frozen and unfrozen inputs both round-trip (Ruby 4.0 raised FrozenError on
+  # frozen input in 1.3.0), and an unfrozen string stays mutable afterwards.
   def test_frozen_and_unfrozen_inputs_round_trip
     frozen = ("frozen input " * 50).freeze
     unfrozen = +"unfrozen input " * 50
@@ -1008,5 +1007,73 @@ class TestCCtx < Minitest::Test
 
     unfrozen << "still mutable"
     assert unfrozen.end_with?("still mutable")
+  end
+
+  # Chilled string literals (files without frozen_string_literal, Ruby 3.4+)
+  # must not trigger "literal string will be frozen in the future": the
+  # library only reads its input. 1.3.1 locked them, which counts as a write.
+  def test_chilled_literal_input_does_not_warn
+    chilled = eval('"chilled literal input"', binding, __FILE__, __LINE__)
+    compressed = eval(VibeZstd.compress("seed").dump, binding, __FILE__, __LINE__) # standard:disable Security/Eval
+    previous = Warning[:deprecated]
+    Warning[:deprecated] = true
+
+    assert_silent do
+      VibeZstd.compress(chilled)
+      VibeZstd::CCtx.new.compress(chilled)
+      VibeZstd::DCtx.new.decompress(compressed)
+      writer = VibeZstd::CompressWriter.new(StringIO.new)
+      writer.write(chilled)
+      writer.finish
+    end
+  ensure
+    Warning[:deprecated] = previous
+  end
+
+  # The source is read from a snapshot, so an IO that mutates the caller's
+  # string mid-write neither crashes nor corrupts the compressed output.
+  def test_writer_input_mutated_during_io_write
+    original = Random.new(42).bytes(1_000_000)
+    data = original.dup
+    io = StringIO.new
+    io.define_singleton_method(:write) do |chunk|
+      data.replace("x" * 10) # resize/reallocate the source mid-loop
+      super(chunk)
+    end
+
+    writer = VibeZstd::CompressWriter.new(io)
+    writer.write(data)
+    writer.finish
+
+    assert_equal "x" * 10, data
+    assert_equal original, VibeZstd.decompress(io.string)
+  end
+
+  # A dup of the source taken while it is in use (here from inside io.write)
+  # shares the snapshot's buffer. It must stay intact after the original is
+  # mutated and after the original has been collected and its memory reused.
+  # Handing the buffer back to the caller with rb_str_tmp_frozen_release
+  # breaks this (use-after-free on Ruby 3.3+); see vibe_zstd_source_snapshot.
+  def test_dup_taken_during_io_write_stays_valid
+    data = "A" * 1_000_000
+    copy = nil
+    io = StringIO.new
+    io.define_singleton_method(:write) do |chunk|
+      copy ||= data.dup
+      super(chunk)
+    end
+
+    writer = VibeZstd::CompressWriter.new(io)
+    writer.write(data)
+    writer.finish
+    refute_nil copy
+
+    data[0] = "Z"
+    assert_equal "A", copy[0], "dup aliases the caller's buffer"
+
+    data = nil
+    GC.start
+    2000.times { "Q" * 100_000 }
+    assert_equal "A" * 8, copy[0, 8], "dup reads freed memory"
   end
 end

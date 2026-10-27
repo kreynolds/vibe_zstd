@@ -280,41 +280,32 @@ vibe_zstd_default_c_level(VALUE self) {
     return INT2NUM(ZSTD_defaultCLevel());
 }
 
-// Run func(arg) without the GVL while str is locked against mutation.
-// rb_thread_call_without_gvl can deliver a pending async exception (e.g.
-// Thread#raise, Timeout) after reacquiring the GVL, so the unlock must go
-// through rb_ensure or the string would be left permanently locked.
+// Source strings are read while the GVL is released (compress/decompress) or
+// while arbitrary Ruby code runs (CompressWriter#write calling io.write), so
+// the caller's String must not be mutated, resized or freed under us.
+// rb_str_locktmp did that through 1.3.1, but Ruby 4.0 raises FrozenError on
+// frozen strings and treats the lock as a write on chilled string literals
+// ("literal string will be frozen in the future"). Instead, borrow the bytes
+// through a frozen snapshot that shares the caller's buffer copy-on-write: a
+// mutation unshares the caller's string and the snapshot keeps the original.
 //
-// Frozen strings are skipped: they cannot be mutated or resized, so the
-// pointer is already stable, and Ruby 4.0+ raises FrozenError from
-// rb_str_locktmp on a frozen string.
-typedef struct {
-    void* (*func)(void*);
-    void* arg;
-} nogvl_locked_call;
-
-static VALUE
-nogvl_locked_body(VALUE p) {
-    nogvl_locked_call* call = (nogvl_locked_call*)p;
-    rb_thread_call_without_gvl(call->func, call->arg, NULL, NULL);
-    return Qnil;
-}
-
-static VALUE
-nogvl_locked_unlock(VALUE str) {
-    rb_str_unlocktmp(str);
-    return Qnil;
-}
-
-static void
-vibe_zstd_nogvl_with_str_locked(void* (*func)(void*), void* arg, VALUE str) {
-    nogvl_locked_call call = { func, arg };
-    if (OBJ_FROZEN(str)) {
-        nogvl_locked_body((VALUE)&call);
-        return;
-    }
-    rb_str_locktmp(str);
-    rb_ensure(nogvl_locked_body, (VALUE)&call, nogvl_locked_unlock, str);
+// The snapshot is a visible frozen String (rb_str_new_frozen) that owns the
+// buffer for as long as anything references it, so a dup/clone of the
+// caller's string taken mid-operation simply shares the same root. The
+// caller's string stays copy-on-write shared until its next mutation, which
+// then costs one copy; that is the price of this approach.
+//
+// Do NOT "optimize" this with rb_str_tmp_frozen_acquire/release (the IO#write
+// primitive) to hand the buffer back afterwards: on Ruby 3.3+ String#dup of
+// a string sharing a hidden root does not mark the root as borrowed, so
+// release un-shares the caller's string and empties the root while the dup
+// still points into the buffer. Any dup taken in io.write, or from another
+// thread during compression, then aliases freed memory (reproduced).
+//
+// Callers must RB_GC_GUARD the snapshot after their last read of it.
+static inline VALUE
+vibe_zstd_source_snapshot(VALUE str) {
+    return rb_str_new_frozen(str);
 }
 
 // Include the split implementation files

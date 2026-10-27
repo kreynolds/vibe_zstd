@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-10-27
+
+### Fixed
+- Chilled string literals (Ruby 3.4+, files without `# frozen_string_literal`) no longer trigger "literal string will be frozen in the future" warnings when passed to `CCtx#compress`, `DCtx#decompress`, `VibeZstd.compress`/`.decompress`, or `CompressWriter#write`. 1.3.1 still called `rb_str_locktmp` on them, which Ruby counts as a write.
+- `DCtx#decompress` now snapshots its input before parsing options, so a keyword argument whose `to_int` mutates the input string can no longer leave a stale source pointer.
+
+### Changed
+- Source strings are no longer locked while the GVL is released. They are read from a frozen copy-on-write snapshot (`rb_str_new_frozen`) instead, the same approach `DecompressReader` already used for input chunks. Another thread (or an IO's `write`) mutating the caller's string mid-operation now succeeds, and the operation keeps reading the original bytes, instead of raising `RuntimeError` ("can't modify string; temporarily locked"). Likewise, a string another thread is concurrently reading into (`IO#read(n, buf)`) is no longer rejected; such a race now yields whatever bytes were in the buffer. Cost: the caller's string stays shared with the snapshot until its next mutation, so a buffer that is refilled and compressed in a loop (`io.read(n, buf); compress(buf)`) pays one copy of its contents per iteration. Fresh strings are unaffected.
+
 ## [1.3.1] - 2026-10-26
 
 ### Fixed

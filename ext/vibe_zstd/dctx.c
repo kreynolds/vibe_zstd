@@ -411,19 +411,17 @@ typedef struct {
     ZSTD_DCtx* dctx;
     ZSTD_DDict* ddict;
     decompress_stream_nogvl_args* args;
-    VALUE data;
+    VALUE src_str;  // frozen snapshot of the source (vibe_zstd_source_snapshot)
     size_t max_size;
 } dctx_stream_decompress_state;
 
-// Body: run the no-GVL stream loop (source string locked), check the outcome,
-// and build the result string. Raising here is safe: cleanup always runs.
+// Body: run the no-GVL stream loop (source is a frozen snapshot), check the
+// outcome, and build the result string. Raising here is safe: cleanup always runs.
 static VALUE
 vibe_zstd_dctx_stream_decompress_body(VALUE p) {
     dctx_stream_decompress_state* state = (dctx_stream_decompress_state*)p;
 
-    // Lock the source string while the GVL is released: another Ruby thread
-    // holding the same string must not mutate or GC it mid-decompression.
-    vibe_zstd_nogvl_with_str_locked(decompress_stream_without_gvl, state->args, state->data);
+    rb_thread_call_without_gvl(decompress_stream_without_gvl, state->args, NULL, NULL);
 
     if (state->args->limit_exceeded) {
         rb_raise(rb_eDecompressedSizeExceeded,
@@ -443,10 +441,12 @@ vibe_zstd_dctx_stream_decompress_body(VALUE p) {
 }
 
 // Cleanup: free the C output buffer and return the context to no-dictionary
-// mode so subsequent calls on this DCtx are not affected.
+// mode so subsequent calls on this DCtx are not affected. The snapshot is
+// guarded here so it outlives every read of it in the body.
 static VALUE
 vibe_zstd_dctx_stream_decompress_cleanup(VALUE p) {
     dctx_stream_decompress_state* state = (dctx_stream_decompress_state*)p;
+    RB_GC_GUARD(state->src_str);
     if (state->args->dst) {
         free(state->args->dst);
         state->args->dst = NULL;
@@ -493,8 +493,12 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
     vibe_zstd_dctx* dctx;
     TypedData_Get_Struct(self, vibe_zstd_dctx, &vibe_zstd_dctx_type, dctx);
     StringValue(data);
-    const char* src = RSTRING_PTR(data);
-    size_t srcSize = RSTRING_LEN(data);
+    // Snapshot the source before taking src: option parsing below can run
+    // Ruby code (to_int), and the GVL is released during decompression
+    // (see vibe_zstd_source_snapshot).
+    VALUE src_str = vibe_zstd_source_snapshot(data);
+    const char* src = RSTRING_PTR(src_str);
+    size_t srcSize = RSTRING_LEN(src_str);
     size_t offset = 0;
 
     // Magicless frames (format = ZSTD_f_zstd1_magicless) carry no magic number,
@@ -642,7 +646,7 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
             .dctx = dctx->dctx,
             .ddict = ddict,
             .args = &stream_args,
-            .data = data,
+            .src_str = src_str,
             .max_size = max_size
         };
         return rb_ensure(vibe_zstd_dctx_stream_decompress_body, (VALUE)&state,
@@ -665,11 +669,10 @@ vibe_zstd_dctx_decompress(int argc, VALUE* argv, VALUE self) {
         .dstCapacity = contentSize,
         .result = 0
     };
-    // Lock the source string while the GVL is released: another Ruby thread
-    // holding the same string must not mutate or GC it mid-decompression.
-    // The helper unlocks via rb_ensure so an async exception cannot leave
-    // the string permanently locked.
-    vibe_zstd_nogvl_with_str_locked(decompress_without_gvl, &args, data);
+    // src points into the frozen snapshot src_str, so it stays valid while
+    // the GVL is released even if the caller's string is mutated.
+    rb_thread_call_without_gvl(decompress_without_gvl, &args, NULL, NULL);
+    RB_GC_GUARD(src_str);
     if (ZSTD_isError(args.result)) {
         rb_raise(rb_eRuntimeError, "Decompression failed: %s", ZSTD_getErrorName(args.result));
     }
