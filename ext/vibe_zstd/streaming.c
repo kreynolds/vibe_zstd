@@ -14,12 +14,6 @@ static VALUE vibe_zstd_reader_initialize(int argc, VALUE *argv, VALUE self);
 static VALUE vibe_zstd_reader_read(int argc, VALUE *argv, VALUE self);
 static VALUE vibe_zstd_reader_eof(VALUE self);
 
-// State struct for rb_ensure-based string lock/unlock in vibe_zstd_writer_write
-typedef struct {
-    vibe_zstd_cstream* cstream;
-    VALUE data;
-} vibe_zstd_write_state;
-
 // TypedData types - defined in vibe_zstd.c
 extern rb_data_type_t vibe_zstd_cstream_type;
 extern rb_data_type_t vibe_zstd_dstream_type;
@@ -106,19 +100,22 @@ vibe_zstd_writer_initialize(int argc, VALUE *argv, VALUE self) {
     return self;
 }
 
-// Body of the rb_ensure wrapper: runs the compress loop with data locked
 static VALUE
-vibe_zstd_writer_write_body(VALUE arg) {
-    vibe_zstd_write_state* state = (vibe_zstd_write_state*)arg;
-    vibe_zstd_cstream* cstream = state->cstream;
-    VALUE data = state->data;
+vibe_zstd_writer_write(VALUE self, VALUE data) {
+    Check_Type(data, T_STRING);
+
+    vibe_zstd_cstream* cstream;
+    TypedData_Get_Struct(self, vibe_zstd_cstream, &vibe_zstd_cstream_type, cstream);
+
+    // io.write (called inside the loop) can run Ruby code that mutates or
+    // resizes the caller's string. Reading from a frozen snapshot keeps
+    // input.src valid regardless (see vibe_zstd_source_snapshot).
+    VALUE src_str = vibe_zstd_source_snapshot(data);
 
     // Input buffer: pos advances as ZSTD consumes data.
-    // data is locked (rb_str_locktmp) for the duration of this call so that
-    // RSTRING_PTR remains valid even when rb_funcall runs arbitrary Ruby code.
     ZSTD_inBuffer input = {
-        .src = RSTRING_PTR(data),
-        .size = RSTRING_LEN(data),
+        .src = RSTRING_PTR(src_str),
+        .size = RSTRING_LEN(src_str),
         .pos = 0
     };
 
@@ -149,43 +146,12 @@ vibe_zstd_writer_write_body(VALUE arg) {
         if (output.pos > 0) {
             rb_str_set_len(outBuffer, output.pos);
             // rb_funcall may run arbitrary Ruby code, but input.src stays valid
-            // because data is locked against mutation/reallocation
+            // because it points into the frozen snapshot src_str
             rb_funcall(cstream->io, id_write, 1, outBuffer);
         }
     }
 
-    return Qnil;
-}
-
-// Ensure function: always unlocks data regardless of raise/return
-static VALUE
-vibe_zstd_writer_write_unlock(VALUE arg) {
-    rb_str_unlocktmp((VALUE)arg);
-    return Qnil;
-}
-
-static VALUE
-vibe_zstd_writer_write(VALUE self, VALUE data) {
-    Check_Type(data, T_STRING);
-
-    vibe_zstd_cstream* cstream;
-    TypedData_Get_Struct(self, vibe_zstd_cstream, &vibe_zstd_cstream_type, cstream);
-
-    // Lock data for the duration of the compress loop so that RSTRING_PTR(data)
-    // stays valid even when io.write (called inside the loop) runs Ruby code that
-    // could otherwise mutate or resize the string.  rb_str_locktmp raises if the
-    // string is already locked; the ensure always unlocks it.  Frozen strings
-    // are already immutable and Ruby 4.0+ refuses to lock them, so skip it.
-    vibe_zstd_write_state state = { cstream, data };
-    if (OBJ_FROZEN(data)) {
-        vibe_zstd_writer_write_body((VALUE)&state);
-        return self;
-    }
-
-    rb_str_locktmp(data);
-    rb_ensure(vibe_zstd_writer_write_body, (VALUE)&state,
-              vibe_zstd_writer_write_unlock, data);
-
+    RB_GC_GUARD(src_str);
     return self;
 }
 

@@ -158,24 +158,23 @@ vibe_zstd_cctx_compress(int argc, VALUE* argv, VALUE self) {
         }
     }
 
-    size_t srcSize = RSTRING_LEN(data);
+    // Read the source from a frozen snapshot (see vibe_zstd_source_snapshot):
+    // another Ruby thread mutating the caller's string cannot invalidate
+    // args.src while the GVL is released.
+    VALUE src_str = vibe_zstd_source_snapshot(data);
+    size_t srcSize = RSTRING_LEN(src_str);
     size_t dstCapacity = ZSTD_compressBound(srcSize);
     VALUE result_str = rb_str_new(NULL, dstCapacity);
     compress_args args = {
         .cctx = cctx->cctx,
-        .src = RSTRING_PTR(data),
+        .src = RSTRING_PTR(src_str),
         .srcSize = srcSize,
         .dst = RSTRING_PTR(result_str),
         .dstCapacity = dstCapacity,
         .result = 0
     };
-    // Lock the source string for the duration of the GVL-released compression.
-    // Without this, another Ruby thread holding the same String object could
-    // modify or reallocate it while compression reads from its buffer, causing
-    // a use-after-free read.  The helper unlocks via rb_ensure so the string
-    // is never left permanently locked, even if an async exception (e.g.
-    // Timeout, Thread#raise) is delivered when the GVL is reacquired.
-    vibe_zstd_nogvl_with_str_locked(compress_without_gvl, &args, data);
+    rb_thread_call_without_gvl(compress_without_gvl, &args, NULL, NULL);
+    RB_GC_GUARD(src_str);
 
     // Restore context state so repeated one-shot calls remain independent.
     if (cdict) ZSTD_CCtx_refCDict(cctx->cctx, NULL);
