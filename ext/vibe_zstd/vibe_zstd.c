@@ -284,6 +284,10 @@ vibe_zstd_default_c_level(VALUE self) {
 // rb_thread_call_without_gvl can deliver a pending async exception (e.g.
 // Thread#raise, Timeout) after reacquiring the GVL, so the unlock must go
 // through rb_ensure or the string would be left permanently locked.
+//
+// Frozen strings are skipped: they cannot be mutated or resized, so the
+// pointer is already stable, and Ruby 4.0+ raises FrozenError from
+// rb_str_locktmp on a frozen string.
 typedef struct {
     void* (*func)(void*);
     void* arg;
@@ -305,6 +309,10 @@ nogvl_locked_unlock(VALUE str) {
 static void
 vibe_zstd_nogvl_with_str_locked(void* (*func)(void*), void* arg, VALUE str) {
     nogvl_locked_call call = { func, arg };
+    if (OBJ_FROZEN(str)) {
+        nogvl_locked_body((VALUE)&call);
+        return;
+    }
     rb_str_locktmp(str);
     rb_ensure(nogvl_locked_body, (VALUE)&call, nogvl_locked_unlock, str);
 }
